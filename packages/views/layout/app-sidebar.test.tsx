@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@multica/core/api";
 import { AppSidebar } from "./app-sidebar";
 
-const { appForeground, chatSessions, chatStore, detail, deletePin, inboxItems, navigation, pins, summary, workspaces } = vi.hoisted(() => ({
+const { appForeground, chatSessions, chatStore, detail, deletePin, inboxItems, navigation, pins, sidebarState, summary, workspaces } = vi.hoisted(() => ({
   appForeground: { current: true },
+  sidebarState: { setOpenMobile: vi.fn() },
   chatSessions: { current: [] as { id?: string; unread_count?: number }[] },
   chatStore: { current: { activeSessionId: null as string | null, isOpen: false } },
   detail: { current: { isPending: false, isError: false, data: null as unknown, error: null as unknown } },
@@ -67,6 +68,7 @@ vi.mock("@multica/ui/components/ui/sidebar", () => ({
   ),
   SidebarMenuItem: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   SidebarRail: () => null,
+  useSidebar: () => ({ setOpenMobile: sidebarState.setOpenMobile }),
 }));
 vi.mock("@multica/ui/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -112,7 +114,11 @@ vi.mock("@multica/core/chat", () => ({
     { getState: () => chatStore.current },
   ),
 }));
-vi.mock("@multica/core/paths", () => ({
+vi.mock("@multica/core/paths", async (importOriginal) => ({
+  // Spread the real module so pure helpers (resolveRouteIconName, used by the
+  // nav to derive each item's icon from its href) stay intact; only the
+  // workspace/context hooks below are stubbed to control routes in tests.
+  ...(await importOriginal<typeof import("@multica/core/paths")>()),
   paths: { workspace: (slug: string) => ({ issues: () => `/${slug}/issues` }) },
   useCurrentWorkspace: () => ({ id: "ws-1", name: "Acme", slug: "acme" }),
   useWorkspacePaths: () => ({
@@ -227,6 +233,36 @@ describe("PinRow", () => {
       "true",
     );
     expect(container.querySelector('button[data-href="/acme/issues"]')).not.toHaveAttribute("data-active");
+  });
+});
+
+// On a phone the sidebar is a Sheet laid over the page, so a nav tap that
+// leaves it open renders the destination underneath and reads as a dead tap.
+describe("mobile sheet dismissal", () => {
+  beforeEach(() => {
+    sidebarState.setOpenMobile.mockClear();
+    navigation.current = { pathname: "/acme/issues" };
+  });
+
+  it("dismisses the sheet once the route changes", () => {
+    const { rerender } = render(<AppSidebar />);
+    sidebarState.setOpenMobile.mockClear();
+
+    navigation.current = { pathname: "/acme/inbox" };
+    rerender(<AppSidebar />);
+
+    expect(sidebarState.setOpenMobile).toHaveBeenCalledWith(false);
+  });
+
+  // Closing on `pathname` rather than per-link keeps every route out of the
+  // sidebar covered at once — nav groups, pins, and the switcher's own push.
+  it("does not re-dismiss while the route holds still", () => {
+    const { rerender } = render(<AppSidebar />);
+    sidebarState.setOpenMobile.mockClear();
+
+    rerender(<AppSidebar />);
+
+    expect(sidebarState.setOpenMobile).not.toHaveBeenCalled();
   });
 });
 

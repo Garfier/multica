@@ -22,6 +22,11 @@ type InboundMessage struct {
 	MessageID    string
 	SenderOpenID OpenID
 	Body         string
+	// Content is the raw msg_type-specific JSON string Lark sends in
+	// event.message.content. Text/post decoding consumes it immediately; media
+	// ingestion keeps it so the adapter can extract image_key/file_key before
+	// translating to channel.InboundMessage.
+	Content string
 	// ForceFreshSession marks this dispatch as a one-off fresh start: the
 	// daemon should skip prior session resume when it claims the resulting
 	// chat task.
@@ -90,4 +95,7 @@ type DispatchResult struct {
 	IssueIdentifier string
 	// IssueTitle is the title supplied on /issue, echoed in the confirmation.
 	IssueTitle string
+	// IssueDuplicate distinguishes an active-issue conflict from a successful
+	// create while carrying the existing issue fields above.
+	IssueDuplicate bool
 }

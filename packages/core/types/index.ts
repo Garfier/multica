@@ -8,11 +8,15 @@ export type {
   AgentInvocationTarget,
   AgentInvocationTargetInput,
   AgentTask,
+  TaskUsage,
   TaskAttribution,
   AttributionUser,
   TaskEvidence,
   AgentActivityBucket,
   AgentRunCount,
+  WorkspaceWorkingAgent,
+  WorkspaceWorkingAgentType,
+  WorkspaceWorkingAgentMineRelation,
   TaskFailureReason,
   AgentRuntime,
   RuntimeDevice,
@@ -22,7 +26,11 @@ export type {
   CreateRuntimeProfileRequest,
   UpdateRuntimeProfileRequest,
   CreateAgentRequest,
+  AgentBuilderRuntimeSwitch,
   AgentBuilderSession,
+  AgentBuilderSessionSummary,
+  AgentPermissionScope,
+  StoredAgentDraft,
   AgentTemplate,
   AgentTemplateSummary,
   AgentTemplateSkillRef,
@@ -35,6 +43,8 @@ export type {
   Skill,
   SkillSummary,
   AgentSkillSummary,
+  DisabledRuntimeSkill,
+  SetAgentRuntimeSkillEnabledRequest,
   SkillFile,
   CreateSkillRequest,
   UpdateSkillRequest,
@@ -47,9 +57,12 @@ export type {
   DashboardUsageByAgent,
   DashboardAgentRunTime,
   DashboardRunTimeDaily,
+  DashboardFailureDaily,
+  DashboardFailureByAgent,
   RuntimeUpdate,
   RuntimeUpdateStatus,
   RuntimeModel,
+  RuntimeModelServiceTier,
   RuntimeModelThinking,
   RuntimeModelThinkingLevel,
   RuntimeModelListRequest,
@@ -66,6 +79,7 @@ export type {
   RuntimeLocalSkillsResult,
   RuntimeLocalSkillImportResult,
   IssueUsageSummary,
+  MikaBootstrapResponse,
 } from "./agent";
 export { RUNTIME_PROFILE_PROTOCOL_FAMILIES } from "./agent";
 export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
@@ -76,6 +90,20 @@ export type { Label, LabelResourceType, CreateLabelRequest, UpdateLabelRequest, 
 export type { IssueProperty, IssuePropertyType, IssuePropertyOption, IssuePropertyConfig, IssuePropertyValue, IssuePropertyValues, CreatePropertyRequest, UpdatePropertyRequest, ListPropertiesResponse, IssuePropertiesResponse } from "./property";
 export { ISSUE_PROPERTY_TYPES, isKnownPropertyType } from "./property";
 export type {
+  QuickAction,
+  QuickActionVisibility,
+  QuickActionAssigneeType,
+  QuickActionStatus,
+  CreateQuickActionRequest,
+  UpdateQuickActionRequest,
+  ListQuickActionsResponse,
+} from "./quick-action";
+export {
+  QUICK_ACTION_SIDEBAR_LIMIT,
+  QUICK_ACTION_TEMPLATE_TOKEN_RE,
+  findQuickActionTemplateToken,
+} from "./quick-action";
+export type {
   TimelineEntry,
   AssigneeFrequencyEntry,
 } from "./activity";
@@ -83,18 +111,29 @@ export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export { attachmentDownloadPath, attachmentIdFromDownloadURL, contentReferencesAttachment } from "./attachment-url";
+export {
+  attachmentDownloadPath,
+  attachmentIdFromDownloadURL,
+  contentReferencesAttachment,
+  stripChannelMediaMarkers,
+} from "./attachment-url";
 export type {
   ChatSession,
   ChatLastMessage,
   ChatPinnedAgent,
   ChatMessage,
+  ChatQuickAction,
+  ChatQuickActionsPendingState,
+  ChatQuickActionsFailureState,
   ChatMessagesPage,
   ChatPendingTask,
+  ChatQueuedTask,
+  PrioritizeQueuedChatTaskResponse,
   PendingChatTaskItem,
   PendingChatTasksResponse,
   HasPendingChatTasksResponse,
   SendChatMessageResponse,
+  StartMikaOnboardingResponse,
   CancelledChatMessage,
   CancelTaskResponse,
   ChatDraftRestore,
@@ -123,10 +162,22 @@ export type {
   GitHubMergeableState,
   GitHubPullRequest,
   GitHubPullRequestChecksConclusion,
+  GitHubPullRequestChecksRollup,
+  GitHubPullRequestMergeable,
+  GitHubPullRequestMergeStateStatus,
   GitHubPullRequestState,
   ListGitHubInstallationsResponse,
+  GitHubRepository,
+  ListGitHubRepositoriesResponse,
   GitHubConnectResponse,
 } from "./github";
+export type {
+  VCSProvider,
+  VCSConnection,
+  ListVCSConnectionsResponse,
+  ConnectVCSRequest,
+  ConnectVCSResponse,
+} from "./vcs";
 export type {
   LarkInstallation,
   ListLarkInstallationsResponse,
@@ -145,6 +196,18 @@ export type {
   RegisterSlackBYORequest,
   RedeemSlackBindingTokenResponse,
 } from "./slack";
+export type {
+  DingTalkInstallation,
+  ListDingTalkInstallationsResponse,
+  RegisterDingTalkBYORequest,
+  RedeemDingTalkBindingTokenResponse,
+} from "./dingtalk";
+export type {
+  WecomInstallation,
+  ListWecomInstallationsResponse,
+  RegisterWecomBYORequest,
+  RedeemWecomBindingTokenResponse,
+} from "./wecom";
 export type {
   Autopilot,
   AutopilotStatus,

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -586,11 +587,41 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := uuidToString(requester.UserID)
-	if err := h.Queries.DeleteProject(r.Context(), db.DeleteProjectParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	if _, err := qtx.LockProjectForDelete(r.Context(), db.LockProjectForDeleteParams{
+		ID:          project.ID,
+		WorkspaceID: project.WorkspaceID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to lock project")
+		return
+	}
+	if err := qtx.ClearChatSessionProjectByProject(r.Context(), db.ClearChatSessionProjectByProjectParams{
+		ProjectID:   project.ID,
+		WorkspaceID: project.WorkspaceID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clear project chat context")
+		return
+	}
+	if err := qtx.DeleteProject(r.Context(), db.DeleteProjectParams{
 		ID:          project.ID,
 		WorkspaceID: project.WorkspaceID,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete project")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit project delete")
 		return
 	}
 	h.publish(protocol.EventProjectDeleted, workspaceID, "member", userID, map[string]any{"project_id": uuidToString(project.ID)})
@@ -690,6 +721,17 @@ func buildProjectSearchQuery(phrase string, terms []string, includeClosed bool) 
 
 	rankExpr := "CASE " + strings.Join(rankCases, " ") + " ELSE 5 END"
 
+	// Cancelled projects are abandoned work. Project search has no other status
+	// ranking, and the command palette renders projects above issues, so
+	// without this a cancelled project can be the very first row of the result
+	// list. Demote ahead of rankExpr, with the same direct-hit exception as
+	// issue search (see buildSearchQuery): an exact title means the user is
+	// targeting that one project.
+	cancelledRank := fmt.Sprintf(
+		"CASE WHEN p.status = 'cancelled' AND LOWER(p.title) <> %s THEN 1 ELSE 0 END",
+		phraseParam,
+	)
+
 	// --- match_source expression ---
 	matchSourceExpr := fmt.Sprintf(`CASE
 		WHEN LOWER(p.title) LIKE %s THEN 'title'
@@ -721,11 +763,12 @@ func buildProjectSearchQuery(phrase string, terms []string, includeClosed bool) 
 		%s AS match_source
 	FROM project p
 	WHERE p.workspace_id = %s AND %s
-	ORDER BY %s, p.updated_at DESC
+	ORDER BY %s, %s, p.updated_at DESC
 	LIMIT %s OFFSET %s`,
 		matchSourceExpr,
 		wsParam,
 		whereClause,
+		cancelledRank,
 		rankExpr,
 		limitParam,
 		offsetParam,

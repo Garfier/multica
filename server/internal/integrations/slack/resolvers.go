@@ -334,16 +334,34 @@ func (r *sessionBinder) EnsureSession(ctx context.Context, p engine.EnsureSessio
 
 func (r *sessionBinder) AppendMessage(ctx context.Context, p engine.AppendParams) (engine.AppendResult, error) {
 	_, _, replyThread := slackSessionRouting(p.Message)
+	commandText := p.Message.CommandText
+	if commandText == "" {
+		commandText = p.Message.Text
+	}
 	return r.session.AppendUserMessage(ctx, engine.AppendInput{
-		SessionID:      p.SessionID,
-		Sender:         p.Sender,
-		InstallationID: p.InstallationID,
-		Body:           p.Message.Text,
-		// Slack text is not enriched, so the command source is the body itself.
-		CommandText: p.Message.Text,
-		MessageID:   p.Message.MessageID,
-		ThreadID:    replyThread,
-		ClaimToken:  p.ClaimToken,
+		SessionID:           p.SessionID,
+		Sender:              p.Sender,
+		InstallationID:      p.InstallationID,
+		Body:                p.Message.Text,
+		CommandText:         commandText,
+		MessageID:           p.Message.MessageID,
+		ThreadID:            replyThread,
+		ClaimToken:          p.ClaimToken,
+		MediaPendingSeconds: p.MediaPendingSeconds,
+	})
+}
+
+func (r *sessionBinder) BindMedia(ctx context.Context, p engine.BindMediaParams) error {
+	return r.session.BindMediaRefs(ctx, engine.BindMediaInput{
+		MessageID:            p.MessageID,
+		SessionID:            p.SessionID,
+		WorkspaceID:          p.WorkspaceID,
+		Sender:               p.Sender,
+		IssueID:              p.IssueID,
+		IssueDescriptionBase: p.IssueDescriptionBase,
+		IssueCommandText:     p.IssueCommandText,
+		Body:                 p.Body,
+		MediaRefs:            p.MediaRefs,
 	})
 }
 

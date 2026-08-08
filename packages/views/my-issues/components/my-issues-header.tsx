@@ -10,8 +10,13 @@ import {
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
-import type { Issue } from "@multica/core/types";
-import type { MyIssuesScope } from "@multica/core/issues/stores/my-issues-view-store";
+import type {
+  Issue,
+  IssueTableFacetSpec,
+  IssueTableFacetsResponse,
+  WorkingAgentSummary,
+} from "@multica/core/types";
+import { type MyIssuesScope } from "@multica/core/issues/stores/my-issues-view-store";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
 import { useT } from "../../i18n";
 import { WorkspaceAgentWorkingChip } from "../../issues/components/workspace-agent-working-chip";
@@ -22,22 +27,26 @@ import {
 
 export function MyIssuesHeader({
   allIssues,
-  workingIssues,
+  workingAgents,
   scope,
   onScopeChange,
   isRefreshing = false,
   facetCountsExact = true,
+  tableFacetCounts,
+  onTableFacetChange,
 }: {
   allIssues: Issue[];
-  /** The rows the agents-working filter would leave on screen — undefined
-   *  when the set is unknown (chip renders indeterminate). Scopes the chip:
-   *  it counts the agents working on these rows. */
-  workingIssues: Issue[] | undefined;
+  /** See IssueSurfaceController.workingAgents. My Issues used to ask the
+   *  working-agents endpoint for its own relation-scoped count; the surface
+   *  projection now covers the relation AND every active filter. */
+  workingAgents: WorkingAgentSummary[] | undefined;
   scope: MyIssuesScope;
   onScopeChange: (scope: MyIssuesScope) => void;
   isRefreshing?: boolean;
   /** See IssueDisplayControls.facetCountsExact. */
   facetCountsExact?: boolean;
+  tableFacetCounts?: IssueTableFacetsResponse;
+  onTableFacetChange: (facet: IssueTableFacetSpec | null) => void;
 }) {
   const { t } = useT("my-issues");
   const { t: tIssues } = useT("issues");
@@ -109,18 +118,20 @@ export function MyIssuesHeader({
 
         <div className="flex shrink-0 items-center gap-1">
           {agentRunningFilter && (
-            <span className="mr-1 hidden text-xs text-muted-foreground md:inline">
+            <span className="mr-1 hidden text-caption text-muted-foreground md:inline">
               {tIssues(($) => $.agent_activity.filter_active_label)}
             </span>
           )}
           <WorkspaceAgentWorkingChip
             value={agentRunningFilter}
             onToggle={toggleAgentRunningFilter}
-            workingIssues={workingIssues}
+            agents={workingAgents}
           />
           <IssueDisplayControls
             scopedIssues={allIssues}
             facetCountsExact={facetCountsExact}
+            tableFacetCounts={tableFacetCounts}
+            onTableFacetChange={onTableFacetChange}
           />
           <ViewRefreshIndicator active={isRefreshing} />
         </div>

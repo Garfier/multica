@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,6 +248,44 @@ func stageFakeAgent(t *testing.T) string {
 	// default, not whatever the developer happens to have exported.
 	t.Setenv("MULTICA_DAEMON_AUTO_UPDATE", "")
 	return binDir
+}
+
+func TestLoadConfig_DiscoversQwenCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on Windows")
+	}
+	binDir := stageFakeAgent(t)
+	qwen := filepath.Join(binDir, "qwen")
+	if err := os.WriteFile(qwen, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake qwen: %v", err)
+	}
+	// Avoid consulting an inherited interactive shell for all deliberately
+	// absent providers; this test is about ordinary PATH discovery.
+	t.Setenv("SHELL", "/usr/bin/fish")
+	t.Setenv("MULTICA_QWEN_MODEL", "qwen3.8-max-preview")
+	t.Setenv("MULTICA_QWEN_ARGS", "--verbose --foo=bar")
+
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "http://localhost:0",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	entry, ok := cfg.Agents["qwen"]
+	if !ok {
+		t.Fatalf("qwen was not discovered: %v", cfg.Agents)
+	}
+	wantPath, err := filepath.EvalSymlinks(qwen)
+	if err != nil {
+		t.Fatalf("eval symlinks for qwen: %v", err)
+	}
+	if entry.Path != wantPath || entry.Command != "qwen" || entry.Model != "qwen3.8-max-preview" {
+		t.Fatalf("qwen entry = %+v, want path=%q command=qwen model=qwen3.8-max-preview", entry, wantPath)
+	}
+	if got, want := strings.Join(cfg.QwenArgs, " "), "--verbose --foo=bar"; got != want {
+		t.Fatalf("QwenArgs = %q, want %q", got, want)
+	}
 }
 
 func TestLoadConfig_SkipsMulticaHooksShadowingAgentBinaries(t *testing.T) {
@@ -552,6 +591,84 @@ func TestLoadConfig_AutoUpdate_NoFlagWinsOverCloudDefault(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_AutoReload_DefaultsOnEvenForSelfHost is the review's first
+// product decision, encoded: "don't pull new versions from GitHub" and "follow
+// the binary I replaced myself" are separate concerns. Self-host defaults
+// auto-update OFF (MUL-2381) because upgrading a fork from an upstream release
+// would clobber it — an argument that says nothing about a binary the operator
+// installed by hand.
+func TestLoadConfig_AutoReload_DefaultsOnEvenForSelfHost(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("MULTICA_DAEMON_AUTO_UPDATE", "")
+	t.Setenv("MULTICA_DAEMON_AUTO_RELOAD", "")
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AutoUpdateEnabled {
+		t.Fatalf("AutoUpdateEnabled = true for self-host, want false (MUL-2381)")
+	}
+	if !cfg.AutoReloadEnabled {
+		t.Fatalf("AutoReloadEnabled = false for self-host; the on-disk watcher must not ride on the auto-update default")
+	}
+}
+
+// TestLoadConfig_AutoReload_NotGatedOnAutoUpdateEnv is the same decoupling at
+// the env layer: turning GitHub polling off must not silently stop the daemon
+// from following a hand-installed binary.
+func TestLoadConfig_AutoReload_NotGatedOnAutoUpdateEnv(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("MULTICA_DAEMON_AUTO_UPDATE", "false")
+	t.Setenv("MULTICA_DAEMON_AUTO_RELOAD", "")
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "https://api.multica.ai",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AutoReloadEnabled {
+		t.Fatalf("MULTICA_DAEMON_AUTO_UPDATE=false disabled auto-reload; the two switches are independent")
+	}
+}
+
+// TestLoadConfig_AutoReload_OffSwitches pins the escape hatch across both layers
+// it can be turned off from. The config-file layer resolves to
+// overrides.DisableAutoReload in cmd_daemon.go, so it is covered by the same
+// assertion as the flag.
+func TestLoadConfig_AutoReload_OffSwitches(t *testing.T) {
+	cases := []struct {
+		name      string
+		env       string
+		overrides Overrides
+	}{
+		{name: "env false", env: "false"},
+		{name: "env 0", env: "0"},
+		{name: "env off", env: "off"},
+		{name: "flag or config file", env: "", overrides: Overrides{DisableAutoReload: true}},
+		{name: "flag beats a truthy env", env: "true", overrides: Overrides{DisableAutoReload: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stageFakeAgent(t)
+			t.Setenv("MULTICA_DAEMON_AUTO_RELOAD", tc.env)
+			overrides := tc.overrides
+			overrides.ServerURL = "https://api.multica.ai"
+			overrides.WorkspacesRoot = t.TempDir()
+			cfg, err := LoadConfig(overrides)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.AutoReloadEnabled {
+				t.Fatalf("AutoReloadEnabled = true, want false")
+			}
+		})
+	}
+}
+
 // TestResolveAgentsViaLoginShell_StripsAliasShadowing locks down the fix for
 // #2512: when the user's rc file declares an alias with the same name as the
 // agent CLI, the resolver must still return the real binary on PATH, not the
@@ -597,7 +714,11 @@ func TestResolveAgentsViaLoginShell_StripsAliasShadowing(t *testing.T) {
 	// scenario the test couldn't actually set up.
 	t.Setenv("SHELL", sh)
 	t.Setenv("ENV", rc)
-	probe, err := exec.Command(sh, "-ilc", "alias fakeclaude 2>/dev/null").Output()
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer probeCancel()
+	probeCmd := exec.CommandContext(probeCtx, sh, "-ilc", "alias fakeclaude 2>/dev/null")
+	probeCmd.Stdin = strings.NewReader("")
+	probe, err := probeCmd.Output()
 	if err != nil || !strings.Contains(string(probe), "fakeclaude") {
 		t.Skipf("test host's /bin/sh did not load alias from $ENV; cannot simulate shadowing (probe=%q err=%v)", string(probe), err)
 	}
@@ -884,6 +1005,7 @@ func pinNonCodexAgentsToMissingPaths(t *testing.T) {
 		"MULTICA_CURSOR_PATH",
 		"MULTICA_COPILOT_PATH",
 		"MULTICA_KIMI_PATH",
+		"MULTICA_REASONIX_PATH",
 		"MULTICA_KIRO_PATH",
 		"MULTICA_GROK_PATH",
 	} {

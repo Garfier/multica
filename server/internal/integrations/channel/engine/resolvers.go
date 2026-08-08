@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
@@ -57,6 +58,13 @@ type Result struct {
 	IssueNumber     int32
 	IssueIdentifier string
 	IssueTitle      string
+	// IssueDuplicate marks an /issue command that did not create a new issue
+	// because the shared duplicate guard found the active IssueID above.
+	// Repliers render this as a business conflict, never as an internal error.
+	IssueDuplicate bool
+	// runScheduled reports whether this ingest scheduled a normal chat run.
+	// It is Router-internal state: repliers must continue to use Outcome.
+	runScheduled bool
 }
 
 // ResolvedInstallation is the channel-agnostic installation context the Router
@@ -89,21 +97,48 @@ type EnsureSessionParams struct {
 // AppendParams carries the inputs for SessionBinder.AppendMessage. ClaimToken
 // is the dedup owner-fence token; the binder runs the dedup Mark INSIDE its
 // chat_message+session tx so the durable write and the Mark commit atomically.
+// MediaPendingSeconds persists the placeholder fallback budget; the append
+// transaction turns it into a DB-clock deadline (now() + budget) so every
+// now()-based consumer reads the same clock that wrote it.
 type AppendParams struct {
-	SessionID      pgtype.UUID
-	Sender         pgtype.UUID
-	InstallationID pgtype.UUID
-	Message        channel.InboundMessage
-	ClaimToken     pgtype.UUID
+	SessionID           pgtype.UUID
+	Sender              pgtype.UUID
+	InstallationID      pgtype.UUID
+	Message             channel.InboundMessage
+	ClaimToken          pgtype.UUID
+	MediaPendingSeconds float64
 }
 
 // AppendResult reports what AppendMessage decided.
 type AppendResult struct {
+	// MessageID is the durable chat_message row created by AppendMessage.
+	// Detached media processing uses it to link attachments after the
+	// connector ACK path has completed.
+	MessageID pgtype.UUID
 	// IssueCommand is non-nil when the message was an /issue command.
 	IssueCommand *IssueCommand
 	// DedupMarked is true when AppendMessage finalized the dedup claim in its
 	// own tx; the Router then skips the post-pipeline finalize.
 	DedupMarked bool
+}
+
+// BindMediaParams carries stored media references to the post-append
+// attachment transaction. MessageID is the durable chat_message whose pending
+// marker the binder clears. IssueID selects issue ownership for an /issue turn;
+// otherwise the references bind to MessageID. IssueDescriptionBase is valid
+// only for an issue created by this turn and lets the binder replace inline
+// placeholders iff nobody edited the description first. Media downloads must
+// never run inside this transaction.
+type BindMediaParams struct {
+	MessageID            pgtype.UUID
+	SessionID            pgtype.UUID
+	WorkspaceID          pgtype.UUID
+	Sender               pgtype.UUID
+	IssueID              pgtype.UUID
+	IssueDescriptionBase pgtype.Text
+	IssueCommandText     string
+	Body                 string
+	MediaRefs            []channel.MediaRef
 }
 
 // IssueCommand is the parsed /issue command.
@@ -161,6 +196,81 @@ type Deduper interface {
 type SessionBinder interface {
 	EnsureSession(ctx context.Context, p EnsureSessionParams) (pgtype.UUID, error)
 	AppendMessage(ctx context.Context, p AppendParams) (AppendResult, error)
+	BindMedia(ctx context.Context, p BindMediaParams) error
+}
+
+// MediaResolver resolves platform media after the user message and dedup mark
+// are durable. The Router runs it off the connector ACK path and binds any
+// returned MediaRefs; the independently scheduled task remains deferred until
+// binding finishes or the persisted deadline expires. Implementations are
+// best-effort: failures leave the stored placeholder text intact and NEVER
+// delete anything inline — every uploaded object is covered by an intent-
+// ledger row written before the PUT (see MediaIntentLedger), and the
+// asynchronous reconciler settles whatever binding did not claim.
+type MediaResolver interface {
+	// HasMedia reports whether msg references platform media that
+	// ResolveMedia would fetch. The Router calls it synchronously on the
+	// connector ACK path to decide whether to persist a media deadline and
+	// queue a resolution job at all, so implementations must be pure
+	// in-memory checks (no I/O). A false result keeps the message on the
+	// plain ingest path: no marker, no deferred run, no semaphore slot.
+	HasMedia(msg channel.InboundMessage) bool
+	// ResolveMedia downloads the platform media and uploads it to object
+	// storage. chatMessageID is the durable chat_message that owns the pending
+	// intent; the Router decides whether the resulting refs belong to that
+	// message or to an issue created from the same turn.
+	ResolveMedia(ctx context.Context, inst ResolvedInstallation, sender ResolvedIdentity, sessionID, chatMessageID pgtype.UUID, msg channel.InboundMessage) channel.InboundMessage
+}
+
+// MediaIntentLedger persists upload intent BEFORE the object is written. The
+// row is the only artifact any failure path leaves behind: upload error,
+// resolve deadline, bind failure, ambiguous commit, or a crash all simply
+// leave it for the reconciler, which settles it long after any in-flight PUT
+// or COMMIT can still land. This is what makes "did my side effect happen?"
+// a question nobody has to answer inline.
+type MediaIntentLedger interface {
+	// RecordPendingMediaObject upserts the intent row. ok=false means the
+	// key has left 'pending' (the reconciler owns it) — the caller must skip
+	// the upload entirely rather than resurrect the row.
+	RecordPendingMediaObject(ctx context.Context, p RecordPendingMediaObjectParams) (ok bool, err error)
+}
+
+// RecordPendingMediaObjectParams identifies one intended object. StorageURL
+// is the URL the attachment row will carry (pure function of the key), so
+// the reconciler can check for a durable reference. InstallationID is an
+// ops-diagnostic only.
+type RecordPendingMediaObjectParams struct {
+	StorageKey     string
+	WorkspaceID    pgtype.UUID
+	ChatMessageID  pgtype.UUID
+	StorageURL     string
+	InstallationID pgtype.UUID
+}
+
+// NewDBMediaIntentLedger adapts *db.Queries to MediaIntentLedger.
+func NewDBMediaIntentLedger(q *db.Queries) MediaIntentLedger {
+	return dbMediaIntentLedger{q: q}
+}
+
+type dbMediaIntentLedger struct{ q *db.Queries }
+
+func (l dbMediaIntentLedger) RecordPendingMediaObject(ctx context.Context, p RecordPendingMediaObjectParams) (bool, error) {
+	_, err := l.q.RecordChannelMediaPendingObject(ctx, db.RecordChannelMediaPendingObjectParams{
+		StorageKey:     p.StorageKey,
+		WorkspaceID:    p.WorkspaceID,
+		ChatMessageID:  p.ChatMessageID,
+		StorageUrl:     p.StorageURL,
+		InstallationID: p.InstallationID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The state-guarded upsert matched a 'deleting' row: the reconciler
+		// owns this key and it must not be resurrected.
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Auditor records a dropped inbound event (no message body — drop-audit
@@ -200,6 +310,7 @@ type ResolverSet struct {
 	Identity     IdentityResolver
 	Dedup        Deduper
 	Session      SessionBinder
+	Media        MediaResolver
 	Audit        Auditor
 	Replier      OutboundReplier
 	Typing       TypingNotifier
@@ -210,12 +321,15 @@ type ResolverSet struct {
 // for the /issue command. Shared across platforms.
 type IssueCreator interface {
 	Create(ctx context.Context, p service.IssueCreateParams, opts service.IssueCreateOpts) (service.IssueCreateResult, error)
+	PublishAttachmentsChanged(ctx context.Context, issue db.Issue, actorID pgtype.UUID)
 }
 
 // TaskEnqueuer is the narrow subset of service.TaskService the Router needs to
 // trigger a chat run. Shared across platforms.
 type TaskEnqueuer interface {
 	EnqueueChatTask(ctx context.Context, session db.ChatSession, initiatorUserID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error)
+	PromoteChannelChatTasksIfMediaReady(ctx context.Context, sessionID pgtype.UUID) error
+	PromoteDeferredChannelIssueTask(ctx context.Context, taskID pgtype.UUID) error
 }
 
 // SessionReader reads the rows the debounced flush + /issue identifier need.

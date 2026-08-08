@@ -91,6 +91,28 @@ Contracts:
   (daemon.go:1187, 1530);
 - briefing includes operating protocol, roster, and optional instructions
   (squad_briefing.go:104-117);
+- `buildSquadLeaderBriefing` takes an `ownsIssueStatus` argument selecting
+  responsibility 6 via `squadOperatingProtocolFor`: the status grant
+  (`squadParentStatusOwned`) only when `issue.assignee_type == "squad"` and
+  `issue.assignee_id == squad.id`, otherwise an explicit prohibition
+  (`squadParentStatusNotOwned`). Quick-create passes `false` — no issue exists
+  yet. Injection is broader than authority on purpose: it is keyed off
+  `is_leader_task`, which also fires for `@squad` mentions on issues owned by
+  someone else (MUL-3724);
+- when the claim's defensive gate withholds the briefing (NULL `squad_id`,
+  squad hard-deleted, leader swapped after enqueue), the handler also clears
+  `is_leader_task` on the claim response, so the wire flag means "briefing
+  injected" and the run degrades to an ordinary agent turn. The daemon derives
+  the leader role from that flag (plus `squad_id` for quick-create), never from
+  the briefing text (MUL-5811);
+- every claim response carries `leader_role_resolved: true`, the capability
+  that tells the daemon those fields are authoritative. Servers predating it
+  omit it, and a daemon seeing it absent falls back to the legacy
+  "`## Squad Operating Protocol` appears in instructions" inference. That is
+  the only correct read of either older shape: before #4951 no `is_leader_task`
+  was sent at all, and after it the flag was sent without any guarantee that a
+  briefing came with it. The field is claim-only and never rendered into a
+  prompt;
 - `instructions` section appears only when non-empty (squad_briefing.go:110-112);
 - archived agent members are skipped from roster (squad_briefing.go:178-179);
 - agent member roster rows list assigned workspace skills via
@@ -119,7 +141,16 @@ Contracts:
 - private leader access is checked at assign-time (issue.go:2629-2632) and at
   enqueue-time via `canEnqueueSquadLeader` (squad.go:1037);
 - archived squad / archived leader rejected at assign-time (issue.go:2622-2627);
-- pending task dedup is applied (squad.go:1042-1048).
+- pending task dedup is applied (squad.go:1042-1048);
+- parent status is agent-managed: assignment brief (`writeWorkflowAssignment` with
+  `IsSquadLeader`) requires `in_progress` on the first turn and forbids
+  unconditional `in_review` on that dispatch turn; Squad Operating Protocol
+  (`squad_briefing.go`) owns the ongoing `in_progress` → later `in_review`
+  contract. `StartTask` / `CompleteTask` do not write issue status. On
+  comment-triggered leader turns `writeWorkflowComment` names that protocol
+  responsibility as the one exception to "do not change status unless the
+  comment asks" — without it the @mention-dispatch shape (no child issues, so
+  no child-done ask) would strand the parent in `in_progress`.
 
 ## Comment / Mention
 
@@ -198,6 +229,11 @@ Contracts:
   process-squad pipeline after stage 1 while direct-to-leader-agent parents
   advanced fine (MUL-4063 / GH #4928). Agent and squad child-done now share one
   ungated path; any future invocation gate must be added to BOTH together.
+- parent status is not auto-advanced by the barrier: the system comment asks the
+  leader to continue or — when the overall goal is met — run
+  `multica issue status <parent-id> in_review`. That explicit ask is what lets a
+  comment-triggered leader turn change status (the comment workflow otherwise
+  forbids status flips unless asked). `done` remains human / integration owned.
 
 ## Private Leader Access
 

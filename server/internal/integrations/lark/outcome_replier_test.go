@@ -90,6 +90,9 @@ func (s *stubAPIClientWithRecorder) GetMessage(ctx context.Context, creds Instal
 func (s *stubAPIClientWithRecorder) ListChatMessages(ctx context.Context, creds InstallationCredentials, p ListMessagesParams) ([]LarkMessage, error) {
 	return nil, nil
 }
+func (s *stubAPIClientWithRecorder) DownloadMessageResource(ctx context.Context, creds InstallationCredentials, p DownloadResourceParams) (DownloadedResource, error) {
+	return DownloadedResource{}, nil
+}
 func (s *stubAPIClientWithRecorder) BatchGetUsers(ctx context.Context, creds InstallationCredentials, openIDs []string) (map[string]string, error) {
 	return nil, nil
 }
@@ -383,6 +386,44 @@ func TestLarkOutcomeReplierIssueCreatedSendsConfirmation(t *testing.T) {
 	// plain text, matching how chat replies render.
 	if len(stub.interactiveOut) != 0 {
 		t.Errorf("issue-created confirmation must not send a card; got %d cards", len(stub.interactiveOut))
+	}
+}
+
+func TestLarkOutcomeReplierIssueDuplicateSendsConflict(t *testing.T) {
+	t.Parallel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stub := &stubAPIClientWithRecorder{configured: true}
+	rep := NewLarkOutcomeReplier(OutcomeReplierConfig{
+		APIClient:   stub,
+		BindingSvc:  &BindingTokenService{},
+		Credentials: stubCredentialsResolver{secret: "s"},
+		Queries:     stubReplierQueries{},
+		AppURL:      "https://multica.test",
+		Logger:      log,
+	})
+
+	inst := Installation{AppID: "cli_x"}
+	inst.ID = mustUUID("11111111-1111-1111-1111-111111111111")
+	rep.Reply(context.Background(), inst, InboundMessage{ChatID: "oc_chat_42"}, DispatchResult{
+		Outcome:         OutcomeIngested,
+		IssueID:         mustUUID("22222222-2222-2222-2222-222222222222"),
+		IssueNumber:     42,
+		IssueIdentifier: "MUL-42",
+		IssueTitle:      "fix login bug",
+		IssueDuplicate:  true,
+	})
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.textOut) != 1 {
+		t.Fatalf("expected one duplicate reply, got %d", len(stub.textOut))
+	}
+	text := stub.textOut[0].Text
+	if !strings.Contains(text, "Not created") || !strings.Contains(text, "MUL-42") || !strings.Contains(text, "fix login bug") {
+		t.Fatalf("duplicate reply = %q", text)
+	}
+	if strings.Contains(text, "Created MUL-42") {
+		t.Fatalf("duplicate reply falsely claimed creation: %q", text)
 	}
 }
 

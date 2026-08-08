@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -343,6 +344,124 @@ func TestRunTask_ExtendsPrepareLeaseDuringStartTask(t *testing.T) {
 	}
 	if !leaseDuringStart.Load() {
 		t.Fatal("prepare lease was not extended while /start was still in flight")
+	}
+}
+
+type prepareLeaseCountingTransport struct {
+	base  http.RoundTripper
+	calls *atomic.Int64
+}
+
+func (t *prepareLeaseCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/prepare-lease") {
+		t.calls.Add(1)
+	}
+	return t.base.RoundTrip(req)
+}
+
+func TestRunTask_PrepareTimeoutStopsLeaseDuringBlockedStartTask(t *testing.T) {
+	oldRefresh := taskPrepareLeaseRefresh
+	oldTimeout := taskPrepareLeaseTimeout
+	taskPrepareLeaseRefresh = 10 * time.Millisecond
+	taskPrepareLeaseTimeout = 500 * time.Millisecond
+	t.Cleanup(func() {
+		taskPrepareLeaseRefresh = oldRefresh
+		taskPrepareLeaseTimeout = oldTimeout
+	})
+
+	var leaseCalls atomic.Int64
+	startEntered := make(chan struct{})
+	var closeStartOnce sync.Once
+	releaseStart := make(chan struct{})
+	var releaseStartOnce sync.Once
+	t.Cleanup(func() { releaseStartOnce.Do(func() { close(releaseStart) }) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/prepare-lease"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			closeStartOnce.Do(func() { close(startEntered) })
+			<-releaseStart
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	// Count requests where the extender starts them. A cancelled RoundTrip can
+	// return before httptest schedules its handler, so counting in the handler
+	// can make an already-in-flight request look like post-timeout activity.
+	client := NewClient(srv.URL)
+	client.client.Transport = &prepareLeaseCountingTransport{
+		base:  client.client.Transport,
+		calls: &leaseCalls,
+	}
+
+	workspacesRoot := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake agent: %v", err)
+	}
+	d := &Daemon{
+		client:             client,
+		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		workspaces:         make(map[string]*workspaceState),
+		runtimeIndex:       map[string]Runtime{"rt-1": {ID: "rt-1", Provider: "claude"}},
+		activeEnvRoots:     make(map[string]int),
+		taskPrepareTimeout: 150 * time.Millisecond,
+		cfg: Config{
+			WorkspacesRoot: workspacesRoot,
+			Agents: map[string]AgentEntry{
+				"claude": {Path: fakeBin},
+			},
+		},
+	}
+
+	task := Task{
+		ID:          "task-runtask-start-timeout",
+		WorkspaceID: "ws-runtask-start-timeout",
+		RuntimeID:   "rt-1",
+		IssueID:     "issue-runtask-start-timeout",
+		Agent:       &AgentData{Name: "test-agent"},
+	}
+	taskLog := slog.New(slog.NewTextHandler(io.Discard, nil))
+	startedAt := time.Now()
+	_, err := d.runTask(context.Background(), task, "claude", 0, taskLog)
+	if !errors.Is(err, errTaskPrepareTimeout) {
+		t.Fatalf("runTask error = %v, want task prepare timeout", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("runTask took %s, want prepare deadline to stop blocked /start", elapsed)
+	}
+	select {
+	case <-startEntered:
+	default:
+		t.Fatal("runTask did not reach /start")
+	}
+	releaseStartOnce.Do(func() { close(releaseStart) })
+	if got := leaseCalls.Load(); got == 0 {
+		t.Fatal("prepare lease request was never started while /start was blocked")
+	}
+	leaseCallsAtReturn := leaseCalls.Load()
+	lastLeaseCalls := leaseCallsAtReturn
+	stableReads := 0
+	deadline := time.Now().Add(12 * taskPrepareLeaseRefresh)
+	for stableReads < 3 && time.Now().Before(deadline) {
+		time.Sleep(taskPrepareLeaseRefresh)
+		got := leaseCalls.Load()
+		if got == lastLeaseCalls {
+			stableReads++
+			continue
+		}
+		lastLeaseCalls = got
+		stableReads = 0
+	}
+	if stableReads < 3 {
+		t.Fatalf("prepare lease kept extending after timeout: calls %d -> %d", leaseCallsAtReturn, leaseCalls.Load())
+	}
+	if got := taskRunFailureReason(err); got != "timeout" {
+		t.Fatalf("taskRunFailureReason = %q, want retryable platform timeout", got)
 	}
 }
 

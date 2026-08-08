@@ -3,7 +3,9 @@ import type {
   Agent,
   AgentTemplate,
   AgentTemplateSummary,
+  AgentBuilderRuntimeSwitch,
   AgentBuilderSession,
+  AgentBuilderSessionSummary,
   Attachment,
   AutopilotRun,
   BillingBalance,
@@ -13,23 +15,46 @@ import type {
   BillingTopupsPage,
   BillingTransactionsPage,
   CancelTaskResponse,
+  ChatMessage,
   ChatDraftRestoresResponse,
+  ChatPendingTask,
+  PrioritizeQueuedChatTaskResponse,
+  SendChatMessageResponse,
+  StartMikaOnboardingResponse,
+  Comment,
   CreateAgentFromTemplateResponse,
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
   CronPreviewResponse,
+  DingTalkInstallation,
+  ListDingTalkInstallationsResponse,
+  RedeemDingTalkBindingTokenResponse,
+  WecomInstallation,
+  ListWecomInstallationsResponse,
+  RedeemWecomBindingTokenResponse,
   GroupedIssuesResponse,
+  GitHubConnectResponse,
+  GitHubPullRequest,
   InboxItem,
   InboxWorkspaceUnread,
   Label,
   IssueProperty,
   ListPropertiesResponse,
+  QuickAction,
+  ListQuickActionsResponse,
   IssuePropertiesResponse,
+  IssueTableGroupDescriptor,
+  IssueTableFacetsResponse,
+  IssueTableGroupsResponse,
+  IssueTableRowsResponse,
   ListIssuesResponse,
+  ListGitHubInstallationsResponse,
+  ListGitHubRepositoriesResponse,
   ListLabelsResponse,
   ListWebhookDeliveriesResponse,
   NotificationPreferenceResponse,
   ResourceLabelsResponse,
+  RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
   Squad,
@@ -39,6 +64,107 @@ import type {
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
+
+export const GitHubInstallationSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  installation_id: z.number().optional(),
+  account_login: z.string(),
+  account_type: z.string(),
+  account_avatar_url: z.string().nullable(),
+  created_at: z.string(),
+  connected_by: z.string().optional(),
+}).loose();
+
+export const ListGitHubInstallationsResponseSchema = z.object({
+  installations: z.array(GitHubInstallationSchema).default([]),
+  configured: z.boolean().optional().default(false),
+  repository_browse_configured: z.boolean().optional().default(false),
+  can_manage: z.boolean().optional().default(false),
+}).loose();
+
+export const EMPTY_LIST_GITHUB_INSTALLATIONS_RESPONSE: ListGitHubInstallationsResponse = {
+  installations: [],
+  configured: false,
+  repository_browse_configured: false,
+  can_manage: false,
+};
+
+export const GitHubConnectResponseSchema = z.object({
+  url: z.string().optional(),
+  configured: z.boolean().optional().default(false),
+}).loose();
+
+export const EMPTY_GITHUB_CONNECT_RESPONSE: GitHubConnectResponse = {
+  configured: false,
+};
+
+export const GitHubRepositorySchema = z.object({
+  id: z.number(),
+  full_name: z.string(),
+  html_url: z.string(),
+  clone_url: z.string(),
+  description: z.string().nullable(),
+  private: z.boolean(),
+  archived: z.boolean(),
+  default_branch: z.string(),
+}).loose();
+
+export const ListGitHubRepositoriesResponseSchema = z.object({
+  repositories: z.array(GitHubRepositorySchema).default([]),
+  total_count: z.number().optional().default(0),
+  next_page: z.number().nullable().optional().default(null),
+}).loose();
+
+export const EMPTY_LIST_GITHUB_REPOSITORIES_RESPONSE: ListGitHubRepositoriesResponse = {
+  repositories: [],
+  total_count: 0,
+  next_page: null,
+};
+
+export const GitHubPullRequestSchema = z.object({
+  id: z.string(),
+  provider: z.string().optional().default("github"),
+  workspace_id: z.string(),
+  repo_owner: z.string(),
+  repo_name: z.string(),
+  number: z.number(),
+  title: z.string(),
+  state: z.string(),
+  html_url: z.string(),
+  branch: z.string().nullable(),
+  author_login: z.string().nullable(),
+  author_avatar_url: z.string().nullable(),
+  merged_at: z.string().nullable(),
+  closed_at: z.string().nullable(),
+  pr_created_at: z.string(),
+  pr_updated_at: z.string(),
+  mergeable: z.string().nullable().optional(),
+  merge_state_status: z.string().nullable().optional(),
+  snapshot_available: z.boolean().optional(),
+  checks_rollup: z.string().nullable().optional(),
+  checks_conclusion: z.string().nullable().optional(),
+  checks_total: z.number().optional().default(0),
+  checks_passed: z.number().optional().default(0),
+  checks_failed: z.number().optional().default(0),
+  checks_running: z.number().optional().default(0),
+  checks_pending: z.number().optional().default(0),
+  failed_check_names: z.array(z.string()).optional().default([]),
+  snapshot_stale: z.boolean().optional().default(false),
+  snapshot_fetched_at: z.string().nullable().optional(),
+  mergeable_state: z.string().nullable().optional(),
+  additions: z.number().optional().default(0),
+  deletions: z.number().optional().default(0),
+  changed_files: z.number().optional().default(0),
+}).loose();
+
+export const IssuePullRequestsResponseSchema = z.object({
+  pull_requests: z.array(GitHubPullRequestSchema).default([]),
+}).loose();
+
+export const EMPTY_ISSUE_PULL_REQUESTS_RESPONSE: { pull_requests: GitHubPullRequest[] } = {
+  pull_requests: [],
+};
 
 // Label responses are consumed by settings tables and resource pickers. Keep
 // the resource type lenient so newer server scopes do not break older clients,
@@ -124,6 +250,63 @@ export const EMPTY_ISSUE_PROPERTY: IssueProperty = {
   updated_at: "",
 };
 
+// Quick actions (MUL-5465). `visibility` and `status` stay z.string() rather
+// than z.enum: they are server-driven, and a newer server adding a value must
+// degrade to the UI's default branch, not blank the whole list.
+export const QuickActionSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  name: z.string(),
+  description: z.string().optional().default(""),
+  assignee_type: z.string(),
+  assignee_id: z.string(),
+  prompt: z.string().optional().default(""),
+  visibility: z.string().optional().default("public"),
+  status: z.string().optional().default("active"),
+  last_used_at: z.string().nullable().optional().default(null),
+  use_count: z.number().optional().default(0),
+  created_by_id: z.string().optional().default(""),
+  created_at: z.string(),
+  updated_at: z.string(),
+  target_name: z.string().optional(),
+  // Both default to the pessimistic reading on an older server: "not known to
+  // be public" and "not known to be missing" keep the settings row honest
+  // rather than asserting a state the server never sent.
+  target_public: z.boolean().optional().default(false),
+  target_missing: z.boolean().optional().default(false),
+}).loose();
+
+export const EMPTY_QUICK_ACTION: QuickAction = {
+  id: "",
+  workspace_id: "",
+  name: "",
+  description: "",
+  assignee_type: "agent",
+  assignee_id: "",
+  prompt: "",
+  visibility: "public",
+  status: "active",
+  last_used_at: null,
+  use_count: 0,
+  created_by_id: "",
+  created_at: "",
+  updated_at: "",
+  target_public: false,
+  target_missing: true,
+};
+
+export const ListQuickActionsResponseSchema = z.object({
+  quick_actions: z.array(QuickActionSchema).default([]),
+}).loose();
+
+export const EMPTY_LIST_QUICK_ACTIONS_RESPONSE: ListQuickActionsResponse = {
+  quick_actions: [],
+};
+
+export const QuickActionRenderSchema = z.object({
+  content: z.string().default(""),
+}).loose();
+
 export const ListPropertiesResponseSchema = z.object({
   properties: z.array(IssuePropertySchema).default([]),
   total: z.number().default(0),
@@ -179,6 +362,10 @@ export interface AppConfigResponse {
   daemon_server_url?: string;
   daemon_app_url?: string;
   workspace_creation_disabled?: boolean;
+  /** Whether this deployment offers the self-hosted Git provider integration
+   * (self-host only; off on the managed cloud). Absent/false hides the whole
+   * Settings → Integrations "Git providers" section. */
+  vcs_integration_available?: boolean;
   feature_flags?: Record<string, boolean>;
   server_version?: string;
 }
@@ -225,6 +412,44 @@ const ReactionSchema = z.object({
 // into the fallback `[]`.
 const AttachmentSchema = z.object({
   id: z.string(),
+}).loose();
+
+const ChatQuickActionSchema = z.object({
+  label: z.string(),
+  prompt: z.string(),
+  primary: z.boolean().optional(),
+}).loose();
+
+export const ChatMessageSchema = z.object({
+  id: z.string(),
+  chat_session_id: z.string(),
+  role: z.enum(["user", "assistant"]).catch("assistant"),
+  content: z.string().default(""),
+  task_id: z.string().nullable().default(null),
+  created_at: z.string().default(""),
+  attachments: z.array(AttachmentSchema).optional(),
+  failure_reason: z.string().nullable().optional(),
+  elapsed_ms: z.number().nullable().optional(),
+  message_kind: z
+    .enum(["message", "no_response", "onboarding_kickoff", "onboarding_opening"])
+    .catch("message")
+    .optional(),
+  // Optional additive data degrades independently: a malformed suggestion
+  // must not hide the assistant reply that contains it.
+  quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
+}).loose();
+
+export const ChatMessageListSchema = z.array(ChatMessageSchema).default([]);
+export const EMPTY_CHAT_MESSAGE_LIST: ChatMessage[] = [];
+
+export const ChatMessagesPageSchema = z.object({
+  messages: z.array(ChatMessageSchema).default([]),
+  limit: z.number().default(50),
+  has_more: z.boolean().default(false),
+  next_cursor: z.object({
+    created_at: z.string(),
+    id: z.string(),
+  }).loose().nullable().optional(),
 }).loose();
 
 // Standalone attachment lookup (`GET /api/attachments/{id}`) is the source of
@@ -329,6 +554,7 @@ export const AppConfigSchema = z.object({
   daemon_server_url: OptionalStringSchema,
   daemon_app_url: OptionalStringSchema,
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
+  vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   server_version: OptionalStringSchema,
 }).loose();
@@ -341,6 +567,7 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   daemon_server_url: "",
   daemon_app_url: "",
   workspace_creation_disabled: false,
+  vcs_integration_available: false,
   feature_flags: {},
 };
 
@@ -379,9 +606,31 @@ export const CommentSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   source_task_id: z.string().nullable().optional(),
+  // Set only on comments a quick action produced (MUL-5465). Server-only.
+  quick_action_id: z.string().nullable().optional(),
 }).loose();
 
 export const CommentsListSchema = z.array(CommentSchema);
+
+// Degraded placeholder for a comment response that failed schema validation.
+// The empty id is the caller's signal that nothing usable came back — the run
+// UI treats it as "could not read the result" rather than a successful run.
+export const EMPTY_COMMENT: Comment = {
+  id: "",
+  issue_id: "",
+  author_type: "member",
+  author_id: "",
+  content: "",
+  type: "comment",
+  parent_id: null,
+  reactions: [],
+  attachments: [],
+  created_at: "",
+  updated_at: "",
+  resolved_at: null,
+  resolved_by_type: null,
+  resolved_by_id: null,
+};
 
 const CommentTriggerPreviewAgentSchema = z.object({
   id: z.string(),
@@ -565,6 +814,117 @@ export const EMPTY_GROUPED_ISSUES_RESPONSE: GroupedIssuesResponse = {
   groups: [],
 };
 
+const IssueTableActorRefSchema = z.object({
+  // Server-driven enums stay open so installed desktop clients survive a
+  // backend that introduces another actor kind.
+  type: z.string(),
+  id: z.string(),
+}).loose();
+
+const IssueTableParentRefSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  identifier: z.string(),
+  title: z.string(),
+  status: z.string(),
+}).loose();
+
+const IssueTableGroupValueSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("status"),
+    status: z.string(),
+  }).loose(),
+  z.object({
+    kind: z.literal("assignee"),
+    actor: IssueTableActorRefSchema.nullable(),
+  }).loose(),
+  z.object({
+    kind: z.literal("project"),
+    project_id: z.string().nullable().optional().default(null),
+  }).loose(),
+  z.object({
+    kind: z.literal("parent"),
+    parent_id: z.string().nullable().optional().default(null),
+    parent: IssueTableParentRefSchema.nullable().optional().default(null),
+    value_state: z.enum(["value", "unavailable", "unset"]),
+  }).loose(),
+  z.object({
+    kind: z.literal("property"),
+    property_id: z.string(),
+    value: z.union([z.string(), z.boolean(), z.null()]).optional(),
+    value_state: z.enum(["value", "unavailable", "unset"]),
+  }).loose(),
+]);
+
+const IssueTableGroupDescriptorSchema: z.ZodType<IssueTableGroupDescriptor> = z.lazy(() => z.object({
+  key: z.string(),
+  value: IssueTableGroupValueSchema,
+  count: z.number(),
+  secondary_groups: z.array(IssueTableGroupDescriptorSchema).optional(),
+}).loose());
+
+export const IssueTableGroupsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  total: z.number(),
+  groups: z.array(IssueTableGroupDescriptorSchema).default([]),
+  next_cursor: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_GROUPS_RESPONSE: IssueTableGroupsResponse = {
+  query_fingerprint: "",
+  total: 0,
+  groups: [],
+  next_cursor: null,
+};
+
+const IssueTableRowSchema = z.object({
+  issue: IssueSchema,
+  direct_child_count: z.number().default(0),
+}).loose();
+
+export const IssueTableRowsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  group_key: z.string().nullable().default(null),
+  parent_id: z.string().nullable().default(null),
+  total: z.number(),
+  rows: z.array(IssueTableRowSchema).default([]),
+  branch_total: z.number(),
+  next_cursor: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_ROWS_RESPONSE: IssueTableRowsResponse = {
+  query_fingerprint: "",
+  group_key: null,
+  parent_id: null,
+  total: 0,
+  rows: [],
+  branch_total: 0,
+  next_cursor: null,
+};
+
+const IssueTableFacetValueSchema = z.object({
+  key: z.string(),
+  count: z.number(),
+}).loose();
+
+const IssueTableFacetSchema = z.object({
+  kind: z.enum(["status", "priority", "assignee", "creator", "project", "label", "property", "working_agents"]),
+  property_id: z.string().optional(),
+  values: z.array(IssueTableFacetValueSchema).default([]),
+}).loose();
+
+export const IssueTableFacetsResponseSchema = z.object({
+  query_fingerprint: z.string(),
+  total: z.number(),
+  facets: z.array(IssueTableFacetSchema).default([]),
+}).loose();
+
+export const EMPTY_ISSUE_TABLE_FACETS_RESPONSE: IssueTableFacetsResponse = {
+  query_fingerprint: "",
+  total: 0,
+  facets: [],
+};
+
 const SubscriberSchema = z.object({
   issue_id: z.string(),
   user_type: z.string(),
@@ -626,6 +986,26 @@ export const EMPTY_CLOUD_RUNTIME_NODE: CloudRuntimeNode = {
 // only that row instead of dropping the whole array to the `[]` fallback.
 // ---------------------------------------------------------------------------
 
+// Cost split carried by every usage row. `cost_usd_ticks` is what the provider
+// itself charged for the rows behind this aggregate (1e-10 USD); the
+// `uncosted_*` counts are the tokens from rows the provider did NOT price, and
+// so are the only ones the client should run through its rate table.
+//
+// The `uncosted_*` fields are deliberately `.optional()` rather than
+// `.default(0)`: a backend that predates them sends nothing, and defaulting
+// those rows to "0 tokens left to estimate" would silently zero their cost.
+// `undefined` means "this backend doesn't split", and the consumer falls back
+// to the full token counts — i.e. exactly the old behaviour. A real 0 from a
+// current backend means "everything here is already priced", which is a
+// different thing and must stay distinguishable.
+const CostSplitShape = {
+  cost_usd_ticks: z.number().optional(),
+  uncosted_input_tokens: z.number().optional(),
+  uncosted_output_tokens: z.number().optional(),
+  uncosted_cache_read_tokens: z.number().optional(),
+  uncosted_cache_write_tokens: z.number().optional(),
+};
+
 const DashboardUsageDailySchema = z.object({
   date: z.string().default(""),
   provider: z.string().default(""),
@@ -634,6 +1014,7 @@ const DashboardUsageDailySchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -647,16 +1028,21 @@ const DashboardUsageByAgentSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
 export const DashboardUsageByAgentListSchema = z.array(DashboardUsageByAgentSchema);
 
+// `cancelled_count` defaults to 0 so an installed client pointed at a
+// backend that predates it still renders: those rows simply carry no
+// cancelled segment, which is exactly what that backend measured.
 const DashboardAgentRunTimeSchema = z.object({
   agent_id: z.string().default(""),
   total_seconds: z.number().default(0),
   task_count: z.number().default(0),
   failed_count: z.number().default(0),
+  cancelled_count: z.number().default(0),
 }).loose();
 
 export const DashboardAgentRunTimeListSchema = z.array(DashboardAgentRunTimeSchema);
@@ -666,9 +1052,36 @@ const DashboardRunTimeDailySchema = z.object({
   total_seconds: z.number().default(0),
   task_count: z.number().default(0),
   failed_count: z.number().default(0),
+  cancelled_count: z.number().default(0),
 }).loose();
 
 export const DashboardRunTimeDailyListSchema = z.array(DashboardRunTimeDailySchema);
+
+// Failure rollups. `failure_reason` is an open string on purpose — it carries
+// the backend's canonical taxonomy, which grows as new classifier rules land
+// (server/pkg/taskfailure). Pinning it to a z.enum would make an installed
+// desktop client drop rows for a reason its build predates; the client folds
+// unrecognised reasons into an "other" display class instead. The empty
+// string is the succeeded bucket, so `.default("")` is a meaningful default
+// only for a row that already lost its reason — such a row lands in the
+// denominator rather than inventing a failure that never happened.
+const DashboardFailureDailySchema = z.object({
+  date: z.string().default(""),
+  failure_reason: z.string().default(""),
+  task_count: z.number().default(0),
+}).loose();
+
+export const DashboardFailureDailyListSchema = z.array(DashboardFailureDailySchema);
+
+const DashboardFailureByAgentSchema = z.object({
+  agent_id: z.string().default(""),
+  failure_reason: z.string().default(""),
+  task_count: z.number().default(0),
+}).loose();
+
+export const DashboardFailureByAgentListSchema = z.array(
+  DashboardFailureByAgentSchema,
+);
 
 // ---------------------------------------------------------------------------
 // Runtime usage schemas — the runtime-detail page's four usage endpoints
@@ -686,6 +1099,7 @@ const RuntimeUsageSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
 }).loose();
 
 export const RuntimeUsageListSchema = z.array(RuntimeUsageSchema);
@@ -705,6 +1119,7 @@ const RuntimeUsageByAgentSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -717,6 +1132,7 @@ const RuntimeUsageByHourSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -763,6 +1179,20 @@ const OptionalStringArraySchema = z.preprocess(
   z.array(z.string()).optional(),
 );
 
+// One (provider, model) slice of a run's token usage. Token counts default to
+// 0 rather than failing the row: a slice missing one counter is still worth
+// pricing on the counters it does have, and the "we have no usage at all" case
+// is carried by the field's absence, not by a zeroed entry.
+const TaskUsageSchema = z.object({
+  provider: z.string().optional(),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cache_write_tokens: z.number().default(0),
+  cost_usd_ticks: z.number().optional(),
+}).loose();
+
 export const AgentTaskSchema = z.object({
   id: z.string(),
   agent_id: z.string().default(""),
@@ -793,6 +1223,12 @@ export const AgentTaskSchema = z.object({
   work_dir: z.string().optional(),
   relative_work_dir: z.string().optional(),
   attribution: TaskAttributionSchema.optional(),
+  // Per-run token usage. Same independent-degradation rule as the coverage
+  // arrays above: usage is additive display metadata, so one malformed entry
+  // must cost the row its usage figure, not erase the whole execution log.
+  // `.catch(undefined)` collapses a bad array to "no usage recorded", which
+  // the UI already renders as an em dash.
+  usage: z.array(TaskUsageSchema).optional().catch(undefined),
 }).loose();
 
 export const AgentTaskListSchema = z.array(AgentTaskSchema);
@@ -833,6 +1269,61 @@ const ChatDraftRestoreSchema = z.object({
 export const ChatDraftRestoresResponseSchema = z.object({
   restores: z.array(ChatDraftRestoreSchema).default([]),
 }).loose();
+
+const ChatQueuedTaskSchema = z.object({
+  task_id: z.string(),
+  status: z.string().default("queued"),
+  created_at: z.string().default(""),
+  message_id: z.string().optional(),
+  content: z.string().optional(),
+}).loose();
+
+const ChatQueuedTasksSchema = z.array(z.unknown()).transform((tasks) =>
+  tasks.flatMap((task) => {
+    const parsed = ChatQueuedTaskSchema.safeParse(task);
+    return parsed.success ? [parsed.data] : [];
+  }),
+);
+
+// Root fields retain the legacy single-task response shape. Keep additive
+// fields optional so callers can distinguish an older server from an empty
+// queue. A malformed queue row is ignored without discarding a valid head.
+export const ChatPendingTaskSchema: z.ZodType<ChatPendingTask> = z.object({
+  task_id: z.string().optional(),
+  status: z.string().optional(),
+  created_at: z.string().optional(),
+  supports_queue: z.boolean().optional(),
+  queued_tasks: ChatQueuedTasksSchema.optional(),
+}).loose();
+
+export const EMPTY_CHAT_PENDING_TASK: ChatPendingTask = {};
+
+export const SendChatMessageResponseSchema: z.ZodType<SendChatMessageResponse> = z.object({
+  message_id: z.string().min(1),
+  task_id: z.string().min(1),
+  supports_queue: z.boolean().optional(),
+  queued: z.boolean().optional().catch(undefined),
+  created_at: z.string().min(1),
+  attachment_ids: z.array(z.string()).nullish().transform((ids) => ids ?? undefined),
+}).loose();
+
+// `started` is the only field the flow branches on, and a malformed response
+// must not be read as "the opening landed" — parseWithFallback's fallback says
+// it did not, which leaves the flow's own retry as the recovery path.
+export const StartMikaOnboardingResponseSchema: z.ZodType<StartMikaOnboardingResponse> = z.object({
+  started: z.boolean(),
+  message_id: z.string().nullish().transform((id) => id ?? undefined),
+  created_at: z.string().nullish().transform((at) => at ?? undefined),
+}).loose();
+
+export const PrioritizeQueuedChatTaskResponseSchema:
+  z.ZodType<PrioritizeQueuedChatTaskResponse> = z.object({
+    task_id: z.string(),
+    active_task_id: z.string().optional(),
+  }).loose();
+
+export const EMPTY_PRIORITIZE_QUEUED_CHAT_TASK_RESPONSE:
+  PrioritizeQueuedChatTaskResponse = { task_id: "" };
 
 export const EMPTY_CHAT_DRAFT_RESTORES: ChatDraftRestoresResponse = {
   restores: [],
@@ -900,6 +1391,8 @@ export const AgentTemplateSchema = AgentTemplateSummarySchemaBase.extend({
   // Detail-only field. Default "" so a malformed detail still renders the
   // header + skill list; the user just sees an empty Instructions block.
   instructions: z.string().default(""),
+  system_key: z.string().optional(),
+  system_instructions: z.string().optional(),
 }).loose();
 
 // Used as the parse fallback for `GET /api/agent-templates/:slug`. Slug comes
@@ -983,6 +1476,70 @@ export const EMPTY_AGENT_BUILDER_SESSION: AgentBuilderSession = {
   runtime_id: "",
 };
 
+/**
+ * The stored configuration of a creation conversation. Every field falls back
+ * to empty on its own: a draft written by a newer build (or truncated in
+ * transit) must still restore the fields it does understand rather than
+ * discarding the user's work wholesale.
+ */
+export const StoredAgentDraftSchema = z.object({
+  name: z.string().catch(""),
+  description: z.string().catch(""),
+  instructions: z.string().catch(""),
+  avatar_url: z.string().nullable().catch(null),
+  model: z.string().catch(""),
+  thinking_level: z.string().catch(""),
+  service_tier: z.string().catch(""),
+  skill_ids: z.array(z.string()).catch([]),
+  permission_scope: z
+    .enum(["private", "workspace", "members"])
+    .catch("private"),
+  member_ids: z.array(z.string()).catch([]),
+  team_ids: z.array(z.string()).catch([]),
+  applied_message_id: z.string().nullable().catch(null),
+}).loose();
+
+/**
+ * One unfinished creation draft. Every field except the id has a safe empty
+ * default: an older server that omits `runtime_id` must degrade to "let the
+ * user pick" rather than dropping the whole row and losing the conversation.
+ */
+export const AgentBuilderSessionSummarySchema = z.object({
+  session_id: z.string(),
+  title: z.string().catch(""),
+  runtime_id: z.string().catch(""),
+  created_at: z.string().catch(""),
+  updated_at: z.string().catch(""),
+  last_message_content: z.string().catch(""),
+  last_message_role: z.string().catch(""),
+  last_message_at: z.string().catch(""),
+  // Absent for a conversation the user has never hand-edited; the client then
+  // replays the last <agent_draft> block instead of restoring a stored copy.
+  draft: StoredAgentDraftSchema.nullish().catch(null),
+}).loose();
+
+export const AgentBuilderSessionListSchema = z.object({
+  sessions: z.array(AgentBuilderSessionSummarySchema).catch([]),
+}).loose();
+
+export const EMPTY_AGENT_BUILDER_SESSION_LIST: {
+  sessions: AgentBuilderSessionSummary[];
+} = { sessions: [] };
+
+export const AgentBuilderRuntimeSwitchSchema = z.object({
+  runtime_id: z.string(),
+}).loose();
+
+// This endpoint returns 2xx only after the carrier has been bound to the
+// runtime the caller asked for; anything else is a thrown error and no commit.
+// So the safe fallback for an unparseable SUCCESS body is the requested id, not
+// an empty one: the rebind did happen, and reporting "unknown" would leave the
+// picker showing a runtime that is no longer executing — the exact split this
+// endpoint exists to close.
+export const agentBuilderRuntimeSwitchFallback = (
+  requestedRuntimeID: string,
+): AgentBuilderRuntimeSwitch => ({ runtime_id: requestedRuntimeID });
+
 // Squad list responses carry lightweight membership previews used by hover
 // cards. The preview fields are additive API fields, so older backends default
 // cleanly to no preview instead of breaking newer frontends.
@@ -998,6 +1555,8 @@ export const SquadSchema = z.object({
   name: z.string(),
   description: z.string().default(""),
   instructions: z.string().default(""),
+  system_key: z.string().optional(),
+  system_instructions: z.string().optional(),
   avatar_url: z.string().nullable().optional().transform((v) => v ?? null),
   leader_id: z.string(),
   creator_id: z.string(),
@@ -1527,4 +2086,174 @@ export const CreateBillingPortalSessionResponseSchema = z.object({
 
 export const EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE: CreateBillingPortalSessionResponse = {
   url: "",
+};
+
+// ---------------------------------------------------------------------------
+// Runtime model discovery (`POST /api/runtimes/:id/models`,
+// `GET /api/runtimes/:id/models/:requestId`). Both endpoints return the same
+// request record, and the UI drives a state machine off `status`, so the two
+// fields that decide behaviour are pinned: `status` gates the polling loop and
+// `supported` gates whether the picker is usable at all. Everything else stays
+// lenient per the rules at the top of this file.
+//
+// `status` deliberately stays `z.string()` (a newer server may add a state);
+// `resolveRuntimeModels` treats anything it does not recognise as an explicit
+// failure rather than a completed-but-empty catalog. `supported` defaults to
+// true so a server old enough to omit it keeps the picker enabled instead of
+// rendering "managed by runtime" off an `undefined`.
+//
+// `cached` / `cached_at` are additive markers for a snapshot served from the
+// server-side catalog cache (MUL-5444); an older backend omits them.
+// ---------------------------------------------------------------------------
+
+const RuntimeModelThinkingLevelSchema = z.object({
+  value: z.string(),
+  label: z.string().default(""),
+  description: z.string().optional(),
+}).loose();
+
+const RuntimeModelThinkingSchema = z.object({
+  supported_levels: z.array(RuntimeModelThinkingLevelSchema).default([]),
+  default_level: z.string().optional(),
+}).loose();
+
+const RuntimeModelServiceTierSchema = z.object({
+  id: z.string(),
+  name: z.string().default(""),
+  description: z.string().optional(),
+}).loose();
+
+// A model entry with no `id` is unselectable — `onChange(m.id)` would persist
+// an empty model — so `id` is required and a malformed entry drops the whole
+// response to the fallback rather than rendering a dead row.
+const RuntimeModelSchema = z.object({
+  id: z.string(),
+  label: z.string().default(""),
+  provider: z.string().optional(),
+  default: z.boolean().optional(),
+  thinking: RuntimeModelThinkingSchema.nullable().optional()
+    .transform((v) => v ?? undefined),
+  service_tiers: z.array(RuntimeModelServiceTierSchema).optional(),
+}).loose();
+
+export const RuntimeModelListRequestSchema = z.object({
+  id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  status: z.string(),
+  models: z.array(RuntimeModelSchema).optional(),
+  supported: z.boolean().default(true),
+  error: z.string().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+  cached: z.boolean().optional(),
+  cached_at: z.string().optional(),
+}).loose();
+
+// Fallback for an unparseable model-discovery response. `failed` is the only
+// honest choice: `completed` would fabricate an empty catalog (and silently
+// clear a saved model when `supported` is read as false), while `pending`
+// would spin the picker until the client-side poll timeout. `failed` surfaces
+// "discovery failed" immediately and leaves the creatable manual-entry field
+// working, which is the same degradation as a real discovery failure.
+export const MALFORMED_RUNTIME_MODEL_LIST_REQUEST: RuntimeModelListRequest = {
+  id: "",
+  runtime_id: "",
+  status: "failed",
+  supported: true,
+  error: "invalid model discovery response",
+  created_at: "",
+  updated_at: "",
+};
+
+export const DingTalkInstallationSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  installer_user_id: z.string().default(""),
+  status: z.string().default("revoked"),
+  installed_at: z.string().default(""),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const EMPTY_DINGTALK_INSTALLATION: DingTalkInstallation = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  installer_user_id: "",
+  status: "revoked",
+  installed_at: "",
+  created_at: "",
+  updated_at: "",
+};
+
+export const ListDingTalkInstallationsResponseSchema = z.object({
+  installations: z.array(DingTalkInstallationSchema).default([]),
+  configured: z.boolean().default(false),
+  install_supported: z.boolean().optional(),
+}).loose();
+
+export const EMPTY_LIST_DINGTALK_INSTALLATIONS_RESPONSE: ListDingTalkInstallationsResponse = {
+  installations: [],
+  configured: false,
+};
+
+export const RedeemDingTalkBindingTokenResponseSchema = z.object({
+  workspace_id: z.string().default(""),
+  installation_id: z.string().default(""),
+  dingtalk_user_id: z.string().default(""),
+}).loose();
+
+export const EMPTY_REDEEM_DINGTALK_BINDING_TOKEN_RESPONSE: RedeemDingTalkBindingTokenResponse = {
+  workspace_id: "",
+  installation_id: "",
+  dingtalk_user_id: "",
+};
+
+// WeCom smart-bot ("智能机器人" / aibot) installation responses. `.loose()` so a
+// newer backend field never fails the parse on an older desktop build (see
+// CLAUDE.md → API Compatibility). Defaults are chosen so a malformed response
+// degrades safely: `configured` defaults false (renders the "ask your operator"
+// state rather than a Connect dialog whose submit is guaranteed to fail), and a
+// missing `status` defaults to "revoked" rather than "active" so a broken read
+// never shows a bot as connected when it may not be.
+export const WecomInstallationSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  bot_id: z.string().default(""),
+  installer_user_id: z.string().default(""),
+  status: z.string().default("revoked"),
+}).loose();
+
+export const EMPTY_WECOM_INSTALLATION: WecomInstallation = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  bot_id: "",
+  installer_user_id: "",
+  status: "revoked",
+};
+
+export const ListWecomInstallationsResponseSchema = z.object({
+  installations: z.array(WecomInstallationSchema).default([]),
+  configured: z.boolean().default(false),
+  install_supported: z.boolean().optional(),
+}).loose();
+
+export const EMPTY_LIST_WECOM_INSTALLATIONS_RESPONSE: ListWecomInstallationsResponse = {
+  installations: [],
+  configured: false,
+};
+
+export const RedeemWecomBindingTokenResponseSchema = z.object({
+  workspace_id: z.string().default(""),
+  installation_id: z.string().default(""),
+  wecom_user_id: z.string().default(""),
+}).loose();
+
+export const EMPTY_REDEEM_WECOM_BINDING_TOKEN_RESPONSE: RedeemWecomBindingTokenResponse = {
+  workspace_id: "",
+  installation_id: "",
+  wecom_user_id: "",
 };

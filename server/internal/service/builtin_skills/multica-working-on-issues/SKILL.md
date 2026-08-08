@@ -1,6 +1,6 @@
 ---
 name: multica-working-on-issues
-description: "Use when working on a Multica issue after the runtime has provided the trigger context — to apply the product contracts the runtime brief does not encode: how PR linking differs from close intent, how to read a linked PR's real state via the pull-requests CLI, which metadata keys are high-signal, what status changes trigger on the server, and how sub-issue create status (todo vs backlog) controls whether assigned agents start immediately."
+description: "Use when acting on a Multica issue beyond what the brief covers: PR linking vs close intent, reading a linked PR's real state, metadata keys, status-change side effects, sub-issue todo vs backlog."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *)
 ---
@@ -104,42 +104,44 @@ Returns `{"pull_requests": [...]}`. Each element exposes:
   response; the server folds them into `state` (merged wins, then closed, then
   draft, else open).
 - `merged_at` — non-null once merged; a second confirmation of `state: merged`.
+- `provider` — `github`, `forgejo`, `gitea`, or `gitlab`.
 - `mergeable_state` — mirrors GitHub (`clean` / `dirty` surfaced; other values
-  round-trip as unknown).
-- `checks_conclusion` — aggregated CI: `passed`, `failed`, `pending`, or `null`
-  when no check suite has been observed. Backed by `checks_passed`,
-  `checks_failed`, `checks_pending` counts.
+  round-trip as unknown; retained for compatibility).
+- GitHub API snapshot fields: `snapshot_available`, `mergeable`,
+  `merge_state_status`, `checks_rollup`, `checks_total`, `checks_passed`,
+  `checks_failed`, `checks_running`, `failed_check_names`,
+  `snapshot_fetched_at`, and `snapshot_stale`. `snapshot_available == true`
+  means the feature is enabled and the snapshot matches the PR's current head.
+  Only then does `checks_rollup == null` mean "no checks"; false means the
+  snapshot feature is disabled, has not fetched yet, or only has an old head.
+- `checks_conclusion` — coarse CI compatibility status: `passed`, `failed`,
+  `pending`, or `null`. GitHub derives it from the current API snapshot;
+  Forgejo/Gitea/GitLab derive it from webhook commit statuses. Backed by the
+  provider-appropriate check counts.
 
 So "is it merged?" is `state == "merged"` (or `merged_at != null`); "is it still
-a draft?" is `state == "draft"`; CI status is `checks_conclusion`.
+a draft?" is `state == "draft"`; coarse CI status is `checks_conclusion`.
 
 If the command returns no linked PRs after a PR was opened, the link scanner did
 not observe a routable issue key in the PR title/body/branch — or the only match
 was a bare body mention, which links as `reference_only` and is hidden from this
 list (see the reference-only rule above).
 
-## Metadata: high-signal keys only
+## Metadata: durable custom state
 
-Metadata is durable issue state. Reading metadata is safe. Writing a metadata key
-is a state mutation and should be tied to an explicit task requirement to record
-that state for later readers or runs.
+Metadata is a free-form KV bag of durable issue state. Reading metadata is safe.
+Writing a metadata key is a state mutation and should be tied to an explicit
+task requirement to record that state for later readers or runs. Keys are
+whatever your workflow needs — the platform curates no vocabulary; pick short
+snake_case names and reuse them consistently within your workspace.
 
-High-signal keys (reuse these names so queries stay consistent):
-
-- `pr_url`
-- `pr_number`
-- `pipeline_status`
-- `deploy_url`
-- `external_issue_url`
-- `waiting_on`
-- `blocked_reason`
-- `decision`
-
-Not metadata: logs, summaries, files touched, timestamps, attempt counts,
-investigation notes. Those belong in the result comment.
+Never store secrets, tokens, or API keys in metadata.
+Not metadata: logs or summaries; runtime bookkeeping such as timestamps,
+attempt counts, or agent IDs; or other single-run details such as
+files touched and investigation notes — those belong in the result comment.
 
 ```bash
-multica issue metadata set <issue-id> --key pr_url --value <url>
+multica issue metadata set <issue-id> --key <key> --value <value>
 multica issue metadata delete <issue-id> --key <stale-key>
 ```
 
@@ -170,7 +172,7 @@ multica issue property unset <issue-id> --name Environment
   If a needed property does not exist, propose it in a comment instead.
 - Property vs metadata: if the value is workflow state a human should see and
   filter by, and a definition exists, prefer the property. Metadata stays the
-  free-form scratchpad for run state (`pr_url`, `waiting_on`, ...).
+  free-form bag for durable custom issue state.
 
 ## Status changes have server side effects
 
@@ -180,6 +182,13 @@ on it. These are the contracts, not advice:
 - **`backlog`** parks an agent-assigned issue: the assignee is set but no task
   fires. Moving `backlog → todo` (or any non-done/non-cancelled status) enqueues
   the assigned agent then.
+- **`in_progress` / `in_review` on assignment runs** are agent-managed CLI
+  mutations, not `StartTask` / `CompleteTask` side effects. The assignment
+  runtime brief asks ordinary agents for `todo`/`backlog` → `in_progress` then
+  `in_review` when they have delivered. Squad leaders share the opening
+  `in_progress` step on the first assignment turn, keep the parent there while
+  members work, and only move to `in_review` when a later re-trigger confirms
+  the overall goal is met.
 - **`in_review`** is an accepted issue status. Some workflows use it while a PR
   is open and awaiting review; moving to it is an explicit mutation.
 - **`done`** on a child issue posts a system comment on its parent. If a PR
@@ -189,6 +198,9 @@ on it. These are the contracts, not advice:
   `done` it enqueues no new agent work, but it does **not** stop tasks already in
   flight — a run in progress keeps going (MUL-4465). To stop a running task,
   cancel the task itself.
+- **Failed issue-triggered tasks** may roll an issue from `in_progress` back to
+  `todo` when no active task / retry remains — that is the main server-owned
+  status write on the agent-run path.
 
 ## Sub-issues: `todo` starts work now, `backlog` parks it
 

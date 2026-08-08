@@ -167,11 +167,13 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from .pi/skills/)
 // For Cursor:   writes {workDir}/AGENTS.md  (skills discovered natively from .cursor/skills/)
 // For Kimi:        writes {workDir}/AGENTS.md  (Kimi Code CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
+// For Reasonix:    writes {workDir}/AGENTS.md  (Reasonix reads AGENTS.md and .reasonix/skills/ natively)
 // For Kiro:        writes {workDir}/AGENTS.md  (Kiro CLI reads AGENTS.md natively; skills auto-discovered from project skills dirs)
-// For Qoder:       writes {workDir}/AGENTS.md  (skills discovered from .qoder/skills/, user-level ~/.qoder/skills is unaffected)
+// For Qoder/Qoder CN: writes {workDir}/AGENTS.md  (skills discovered from .qoder/skills/; user-level roots are unaffected)
 // For Antigravity: writes {workDir}/AGENTS.md  (agy CLI reads AGENTS.md natively; skills discovered natively from .agents/skills/ — see https://antigravity.google/docs/gcli-migration)
 // For Traecli:     writes {workDir}/AGENTS.md  (traecli reads .trae/rules/ not AGENTS.md, so the brief is delivered inline via providerNeedsInlineSystemPrompt; the file is written for parity/visibility only)
 // For Grok:        writes {workDir}/AGENTS.md  (Grok Build CLI reads AGENTS.md natively from the workdir)
+// For Qwen:        writes {workDir}/QWEN.md (Qwen Code's native context file; it also reads AGENTS.md, but QWEN.md avoids cross-runtime ambiguity)
 func InjectRuntimeConfig(workDir, provider string, ctx TaskContextForEnv) (string, error) {
 	content := buildMetaSkillContent(provider, ctx)
 	path := runtimeConfigPath(workDir, provider)
@@ -198,7 +200,9 @@ func runtimeConfigPath(workDir, provider string) string {
 		// file"). CodeBuddy only reads CLAUDE.md if the user manually
 		// migrates/symlinks it in.
 		return filepath.Join(workDir, "CODEBUDDY.md")
-	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "qoder", "traecli", "grok":
+	case "qwen":
+		return filepath.Join(workDir, "QWEN.md")
+	case "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw":
 		return filepath.Join(workDir, "AGENTS.md")
 	default:
 		return ""

@@ -98,20 +98,24 @@ func (c *feishuChannel) Capabilities() channel.Capability {
 }
 
 func (c *feishuChannel) installationCredentials() (InstallationCredentials, error) {
-	if c.creds == nil {
+	return installationCredentialsFor(c.inst, c.creds)
+}
+
+func installationCredentialsFor(inst Installation, resolver CredentialsResolver) (InstallationCredentials, error) {
+	if resolver == nil {
 		return InstallationCredentials{}, errors.New("lark: credentials resolver missing")
 	}
-	secret, err := c.creds.DecryptAppSecret(c.inst)
+	secret, err := resolver.DecryptAppSecret(inst)
 	if err != nil {
 		return InstallationCredentials{}, fmt.Errorf("decrypt app_secret: %w", err)
 	}
 	creds := InstallationCredentials{
-		AppID:     c.inst.AppID,
+		AppID:     inst.AppID,
 		AppSecret: secret,
-		Region:    RegionOrDefault(c.inst.Region),
+		Region:    RegionOrDefault(inst.Region),
 	}
-	if c.inst.TenantKey.Valid {
-		creds.TenantKey = c.inst.TenantKey.String
+	if inst.TenantKey.Valid {
+		creds.TenantKey = inst.TenantKey.String
 	}
 	return creds, nil
 }
@@ -119,7 +123,8 @@ func (c *feishuChannel) installationCredentials() (InstallationCredentials, erro
 // channelMessageFromLark normalizes a decoded Feishu InboundMessage into the
 // cross-platform channel.InboundMessage. The original struct is stashed in Raw
 // so the Feishu resolvers can read the platform-specific fields (app_id,
-// event_type, command body, create time) the envelope does not carry.
+// event_type, create time) the envelope does not carry. CommandBody maps to
+// the normalized CommandText field because command classification is shared.
 func channelMessageFromLark(lm InboundMessage) channel.InboundMessage {
 	raw, _ := json.Marshal(lm)
 	var reply *channel.ReplyCtx
@@ -131,6 +136,7 @@ func channelMessageFromLark(lm InboundMessage) channel.InboundMessage {
 		MessageID:      lm.MessageID,
 		Type:           channelMsgType(lm.MessageType),
 		Text:           lm.Body,
+		CommandText:    lm.CommandBody,
 		ReplyTo:        reply,
 		AddressedToBot: lm.AddressedToBot,
 		ForceFresh:     lm.ForceFreshSession,

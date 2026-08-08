@@ -1,6 +1,7 @@
 // Package agent provides a unified interface for executing prompts via
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
-// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder, Trae, Grok). It
+// OpenClaw, Hermes, Pi, Cursor, Kimi, Reasonix, Kiro, Antigravity, Qoder,
+// Trae, Grok, Qwen Code, QwenPaw). It
 // mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
@@ -24,9 +25,14 @@ type Backend interface {
 type ExecOptions struct {
 	Cwd   string
 	Model string
-	// SystemPrompt is consumed only by providers that can pass or safely inline
-	// developer/system instructions. Hermes ACP intentionally ignores it and
-	// relies on cwd-scoped context files such as AGENTS.md instead.
+	// SystemPrompt carries the Multica runtime brief for the few providers
+	// that cannot pick it up from disk. The daemon leaves it empty for every
+	// other provider (see daemon.providerNeedsInlineSystemPrompt), because the
+	// brief is already delivered as a per-task context file in the workdir —
+	// CLAUDE.md, AGENTS.md, CODEBUDDY.md or QWEN.md depending on the runtime.
+	//
+	// A backend must therefore NOT assume this is populated, and adding a new
+	// backend that only reads SystemPrompt will silently receive nothing.
 	SystemPrompt              string
 	ThreadName                string
 	MaxTurns                  int
@@ -47,12 +53,30 @@ type ExecOptions struct {
 	// conversation, independent of ResumeSessionID (which a fallback retry may
 	// clear). When it is true but the backend ends up on a fresh thread — the
 	// live resume RPC was rejected, or a transport failure forced a fresh retry —
-	// the backend surfaces a continuity notice to the user instead of silently
+	// the backend surfaces a continuity notice instead of silently
 	// restarting. Currently honoured by the codex backend (MUL-4424).
 	ResumeExpected bool
-	ExtraArgs      []string        // daemon-wide default CLI arguments appended before CustomArgs; currently read by claude and codex backends only
-	CustomArgs     []string        // per-agent CLI arguments appended after ExtraArgs
-	McpConfig      json.RawMessage // if non-nil, MCP server config to pass via --mcp-config
+	// ResumeContinuityNotice is the text to prepend to the first turn when
+	// ResumeExpected holds but the backend lands on a fresh thread anyway. The
+	// caller owns the wording because only it knows what the surface lost — an
+	// issue's comments and a Slack channel's history survive and can be re-read,
+	// a web chat's and a Feishu channel's cannot — and that difference decides
+	// whether the agent should tell the user anything at all (MUL-5722).
+	//
+	// Empty means say nothing, and the caller MUST leave it empty when its own
+	// prompt already carries the notice. That is what keeps a turn from paying
+	// for the same paragraph twice: the daemon injects it whenever it already
+	// knows the resume is gone, and the backend covers only the case the daemon
+	// cannot see — a live resume RPC rejected mid-run.
+	ResumeContinuityNotice string
+	// ExtraArgs is honoured only by backends that opt in by reading it; the
+	// rest ignore it. Deliberately not enumerated here — the previous list
+	// went stale as backends were added, which is how MULTICA_QWENPAW_ARGS
+	// shipped plumbed but dropped. Grep for ExtraArgs to see today's set.
+	ExtraArgs        []string        // daemon-wide default CLI arguments appended before CustomArgs
+	CustomArgs       []string        // per-agent CLI arguments appended after ExtraArgs
+	QwenpawWorkspace string          // per-task QwenPaw workspace directory (passed as --workspace to qwenpaw acp); empty when not applicable
+	McpConfig        json.RawMessage // if non-nil, MCP server config to pass via --mcp-config
 	// ThinkingLevel is the runtime-native reasoning/effort value (e.g.
 	// Claude's "low|medium|high|xhigh|max", Codex's "none|minimal|low|
 	// medium|high|xhigh", OpenCode's model variant names). Empty means
@@ -64,6 +88,10 @@ type ExecOptions struct {
 	// the field rather than fail (so MUL-2339 can grow runtime support
 	// incrementally without breaking unrelated agents).
 	ThinkingLevel string
+	// ServiceTier is a runtime-native Codex execution tier (for example
+	// "priority", displayed as Fast). Empty means inherit local Codex config.
+	// Other providers ignore this field.
+	ServiceTier string
 	// OpenclawMode chooses between local (embedded) and gateway routing for
 	// the openclaw backend. "" or "local" keeps the historical behaviour —
 	// the daemon spawns `openclaw agent --local …` and the agent loop runs
@@ -75,6 +103,10 @@ type ExecOptions struct {
 	// ignore this field, mirroring ThinkingLevel's renderer-side fall-through
 	// pattern. See issue #3260.
 	OpenclawMode string
+	// ClaudeSettingsPath is a daemon-owned, task-local settings file passed
+	// through Claude Code's --settings flag. It currently carries restrictive
+	// runtime-skill overrides only; other providers ignore it.
+	ClaudeSettingsPath string
 }
 
 // runContext derives the execution context for an agent subprocess from the
@@ -131,7 +163,22 @@ type TokenUsage struct {
 	OutputTokens     int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
+	// CostUSDTicks is the provider's own statement of what this usage cost,
+	// in ticks of 1e-10 USD. Zero means "not reported" — only a few agents
+	// return it (xAI Grok Build does, via `_meta.usage.costUsdTicks`).
+	//
+	// It matters because a token-times-rate estimate cannot reproduce
+	// request-level pricing rules. xAI bills a request at 2x once its prompt
+	// reaches 200K tokens, and a usage record aggregates every model call in
+	// a turn — so the stored token counts cannot say which tier any single
+	// request hit. The provider's own figure already has that priced in.
+	CostUSDTicks int64
 }
+
+// CostUSDTicksPerUSD is the scale of the provider-reported cost unit: xAI
+// reports whole ticks of 1e-10 USD, which keeps sub-cent turn costs exact in
+// int64 all the way to the database instead of drifting through float64.
+const CostUSDTicksPerUSD = 10_000_000_000
 
 // Result is the final outcome after an agent session completes.
 type Result struct {
@@ -141,16 +188,43 @@ type Result struct {
 	DurationMs int64
 	SessionID  string
 	Usage      map[string]TokenUsage // keyed by model name
+	// ResumeRejected is positive evidence that this run's requested resume
+	// was itself refused — the transcript is gone, the session belongs to
+	// another provider account, OR the session still exists but its history
+	// can no longer be replayed to the provider (e.g. GH #5975: a stored
+	// image now exceeds the provider's max dimensions, so every resumed
+	// session/prompt is rejected before the turn runs). What unites these is
+	// that the resume CANNOT continue and only starting over can cure it, so
+	// it is what the daemon's fresh-session fallback looks for first. Note the
+	// last case keeps a non-empty SessionID (the id is real, only its history
+	// is unusable) — the daemon gates on this boolean, not an empty id.
+	//
+	// false is NOT evidence of the opposite. For a backend listed in
+	// ResumeRejectionUndetectable it means "could not tell"; for every other
+	// backend it means "checked, and this was not a rejection". The daemon
+	// needs the provider name to tell those apart — see
+	// shouldRetryWithFreshSession in internal/daemon.
+	//
+	// Backends must NOT set it for failures a new session cannot cure:
+	// network drops, rate limits, quota, provider 5xx, or auth errors. Those
+	// keep the session pointer so the platform's own retry can resume the
+	// truncated conversation (see retryableReasons in internal/service/task.go).
+	ResumeRejected bool
 	// codexInitializeRetrySafe is provider-internal evidence that an
 	// initialize timeout happened before semantic activity and after the
 	// process tree was reaped. It is intentionally not part of the public
 	// result contract.
 	codexInitializeRetrySafe bool
+	// codexStartupRefreshRetrySafe is provider-internal evidence that the
+	// first turn produced no semantic progress because Codex could not load
+	// its model catalog, and that the process tree was reaped afterwards.
+	// Like codexInitializeRetrySafe it is not part of the public contract.
+	codexStartupRefreshRetrySafe bool
 }
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, qodercli, traecli, grok)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw)
 	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -158,23 +232,37 @@ type Config struct {
 	RuntimeID      string
 	DaemonVersion  string
 	CodexVersion   string
+	// BuiltinRuntime reports that ExecutablePath is the provider's own
+	// discovered binary rather than a custom runtime profile's command. A
+	// custom profile keeps its protocol family as the provider, so the
+	// provider name cannot distinguish the two: `protocol_family: hermes`
+	// with `command_name: jcode` arrives as "hermes" while being an
+	// unrelated implementation. Backends use this to scope
+	// compatibility exceptions that were verified against a specific
+	// vendor's binary; it defaults to false so an unset caller fails
+	// closed onto standard behavior.
+	BuiltinRuntime bool
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "qoder", "traecli", "grok".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
 // runtime_profile.protocol_family CHECK constraint (migration 120, widened by
 // migration 134 to add qoder, migration 136 to add traecli, migration 175 to
-// add deveco, and migration 179 to add grok): a custom runtime profile may only
+// add deveco, migration 179 to add grok, migration 202 to add qwen,
+// migration 242 to add qoderclicn, migration 253 to add qwenpaw, and
+// migration 254 to add reasonix): a
+// custom runtime profile may only
 // be based on a backend Multica officially supports.
-// qoder is exposed here so Qoder CN (`qoderclicn`) users can point the Qoder
-// backend at a non-default binary instead of misrouting through Kiro/ACP with
-// incompatible arguments (#4883). traecli (Trae) has a New backend, launch
+// qoder and qoderclicn share the same ACP backend; keeping both provider keys
+// lets the daemon auto-detect and register the international and China-region
+// binaries independently. traecli (Trae) has a New backend, launch
 // header and provider branding but was previously missing from this whitelist,
 // so the family picker rejected it (#4945). grok is the xAI Grok Build CLI
-// ACP backend (`grok agent --always-approve stdio`).
+// ACP backend (`grok agent --always-approve stdio`). qwen is Qwen Code's
+// native `qwen -p <prompt> --output-format stream-json` backend.
 var SupportedTypes = []string{
 	"claude",
 	"codebuddy",
@@ -187,11 +275,15 @@ var SupportedTypes = []string{
 	"pi",
 	"cursor",
 	"kimi",
+	"reasonix",
 	"kiro",
 	"antigravity",
 	"qoder",
+	"qoderclicn",
 	"traecli",
 	"grok",
+	"qwen",
+	"qwenpaw",
 }
 
 // IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
@@ -204,6 +296,33 @@ func IsSupportedType(agentType string) bool {
 		}
 	}
 	return false
+}
+
+// resumeRejectionUndetectable lists the backends that cannot produce
+// Result.ResumeRejected at all. They scrape SessionID out of stream output and
+// have no rejection detection: no phrase match, no structured error code, no
+// internal restart. copilot's own comment documents the hole (a session.error
+// arriving before session.start leaves SessionID empty), and antigravity's
+// conversation-id reader returns "" whenever the CLI exits before dispatching.
+//
+// Membership is deliberately opt-in. A backend absent from this map is treated
+// as capable, so a new backend fails closed — it reports no rejection and gets
+// no fallback — rather than silently inheriting a guess-based retry. Remove an
+// entry as soon as its backend learns to report rejections.
+var resumeRejectionUndetectable = map[string]bool{
+	"antigravity": true,
+	"copilot":     true,
+	"cursor":      true,
+	"deveco":      true,
+	"opencode":    true,
+}
+
+// ResumeRejectionUndetectable reports whether agentType is a backend that
+// cannot tell a refused resume from any other startup failure. Callers use it
+// to read a false Result.ResumeRejected correctly: "could not tell" for these,
+// "checked, not a rejection" for everything else.
+func ResumeRejectionUndetectable(agentType string) bool {
+	return resumeRejectionUndetectable[agentType]
 }
 
 func New(agentType string, cfg Config) (Backend, error) {
@@ -234,20 +353,24 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &cursorBackend{cfg: cfg}, nil
 	case "kimi":
 		return &kimiBackend{cfg: cfg}, nil
+	case "reasonix":
+		return &reasonixBackend{cfg: cfg}, nil
 	case "kiro":
 		return &kiroBackend{cfg: cfg}, nil
 	case "antigravity":
 		return &antigravityBackend{cfg: cfg}, nil
-	case "qoder":
-		return &qoderBackend{cfg: cfg}, nil
+	case "qoder", "qoderclicn":
+		return &qoderBackend{cfg: cfg, defaultExecutable: qoderDefaultBinary(agentType)}, nil
 	case "traecli":
 		return &traecliBackend{cfg: cfg}, nil
 	case "grok":
 		return &grokBackend{cfg: cfg}, nil
 	case "qwen":
-		return &claudeBackend{cfg: cfg, variant: "qwen"}, nil
+		return &qwenBackend{cfg: cfg}, nil
+	case "qwenpaw":
+		return &qwenpawBackend{cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen)", agentType)
+		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, reasonix, kiro, antigravity, qoder, qoderclicn, traecli, grok, qwen, qwenpaw)", agentType)
 	}
 }
 
@@ -272,14 +395,17 @@ var launchHeaders = map[string]string{
 	"deveco":      "deveco run (json)",
 	"hermes":      "hermes acp",
 	"kimi":        "kimi acp",
+	"reasonix":    "reasonix acp",
 	"kiro":        "kiro-cli acp",
 	"openclaw":    "openclaw agent (json)",
 	"opencode":    "opencode run (json)",
 	"pi":          "pi (json mode)",
 	"qoder":       "qodercli --acp",
+	"qoderclicn":  "qoderclicn --acp",
 	"traecli":     "traecli acp serve",
 	"grok":        "grok agent stdio",
-	"qwen":        "qwen (stream-json)",
+	"qwen":        "qwen -p (stream-json)",
+	"qwenpaw":     "qwenpaw acp",
 }
 
 // LaunchHeader returns the user-visible launch skeleton for agentType, or an

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,15 +11,29 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
+
+// claudeTerminateGraceNanos optionally overrides, in nanoseconds, how long a
+// cancelled claude process group is given to exit after SIGTERM before it is
+// SIGKILLed. Set via atomic store in tests; zero keeps the default.
+var claudeTerminateGraceNanos atomic.Int64
+
+func claudeTerminateGrace() time.Duration {
+	if n := claudeTerminateGraceNanos.Load(); n > 0 {
+		return time.Duration(n)
+	}
+	return 5 * time.Second
+}
 
 // claudeBackend implements Backend by spawning the Claude Code CLI
 // with --output-format stream-json.
-// variant controls CLI arg generation: "" (claude), "qwen", "qoder".
 type claudeBackend struct {
-	cfg     Config
-	variant string
+	cfg Config
 }
 
 func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
@@ -35,7 +48,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	timeout := opts.Timeout
 	runCtx, cancel := runContext(ctx, timeout)
 
-	args := buildClaudeArgs(opts, b.cfg.Logger, b.variant)
+	args := buildClaudeArgs(opts, b.cfg.Logger)
 
 	// If the caller provided an MCP config, write it to a temp file and pass
 	// --mcp-config <path> so the agent uses a controlled set of MCP servers
@@ -61,6 +74,21 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 
 	cmd := exec.CommandContext(runCtx, execPath, args...)
 	hideAgentWindow(cmd)
+	// Run claude in its own process group so cancellation can reach the whole
+	// tree — the claude CLI plus the MCP servers and tool subprocesses it
+	// spawns — not just the direct child. The default CommandContext behaviour
+	// SIGKILLs only the leader, which orphans those descendants; on a resumed
+	// stream-json session with no wall-clock timeout they then keep running and
+	// burning model budget long after the task was cancelled, and under
+	// --max-concurrent-tasks 1 starve every queued task (#5918). This mirrors
+	// the fix already made for codex (#4520) and opencode (#4533).
+	configureProcessGroup(cmd)
+	// Take over context cancellation: the default would SIGKILL only the leader
+	// the instant runCtx is done. We instead drive a graceful group-wide
+	// SIGTERM→SIGKILL from the cancellation goroutine below and close stdout
+	// only after the tree has been signalled. Returning nil keeps os/exec from
+	// racing us with its own kill; WaitDelay remains the hard backstop.
+	cmd.Cancel = func() error { return nil }
 	b.cfg.Logger.Info("agent command", "exec", execPath, "args", args)
 	cmd.WaitDelay = 10 * time.Second
 	if opts.Cwd != "" {
@@ -106,6 +134,10 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
 
+	// procDone closes once cmd.Wait() returns, letting the cancellation handler
+	// skip a process that already exited and avoid signalling a dead/reused pid.
+	procDone := make(chan struct{})
+
 	// writeClaudeInput runs in its own goroutine so it cannot deadlock
 	// against the stdout reader. With --verbose --output-format stream-json
 	// the CLI emits a startup banner before reading its first stdin frame;
@@ -142,6 +174,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		var finalResultText string
 		sawResult := false
 		resultIsError := false
+		terminalReasonError := ""
 		var sessionID string
 		sawAsyncLaunch := false
 		usage := make(map[string]TokenUsage)
@@ -149,16 +182,41 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		invalidEventCount := 0
 		assistantEventCount := 0
 		toolUseCount := 0
+		unreadableAssistantCount := 0
 
-		// Close stdout when the context is cancelled so scanner.Scan() unblocks.
+		// On cancellation / timeout, terminate claude (and every MCP server and
+		// tool subprocess it spawned) BEFORE unblocking the scanner. EOF stdin
+		// to nudge a clean exit, then SIGTERM the whole process group, give it a
+		// grace period, and SIGKILL the group if any member is still alive.
+		// SIGKILL is uncatchable, so once delivered no group member can write
+		// again — only then is it safe to close the stdout read end as a
+		// last-resort unblock for a scanner a wedged descendant still keeps
+		// open. WaitDelay is the final backstop (#5918).
 		go func() {
-			<-runCtx.Done()
+			select {
+			case <-procDone:
+				return // finished on its own; nothing to terminate
+			case <-runCtx.Done():
+			}
 			closeStdin()
+			if cmd.Process != nil {
+				signalProcessGroup(cmd.Process, syscall.SIGTERM)
+				// Escalate to a group SIGKILL unless the WHOLE process group has
+				// exited within the grace window. This must key off the process
+				// group, not procDone: procDone only means cmd.Wait() returned
+				// for the leader, so a SIGTERM-ignoring descendant that does not
+				// hold claude's stdout would let the leader exit, close procDone,
+				// and skip the SIGKILL — leaking exactly the orphan this fix
+				// targets. waitProcessGroupGone returns as soon as the group is
+				// empty, so the graceful case adds no latency.
+				if !waitProcessGroupGone(cmd.Process, claudeTerminateGrace()) {
+					signalProcessGroup(cmd.Process, syscall.SIGKILL)
+				}
+			}
 			_ = stdout.Close()
 		}()
 
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+		scanner := newAgentStreamScanner(stdout)
 
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -176,15 +234,12 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			switch msg.Type {
 			case "assistant":
 				assistantEventCount++
-				assistantText, tools := b.handleAssistant(msg, msgCh, usage)
-				toolUseCount += tools
-				if tools == 0 {
-					lastAssistantText = assistantText
-				} else {
-					// A turn that invokes a tool is intermediate even when it also
-					// contains narration. Do not use it as an empty-result fallback.
-					lastAssistantText = ""
+				turn := b.handleAssistant(msg, msgCh, usage)
+				toolUseCount += turn.toolUses
+				if !turn.understood {
+					unreadableAssistantCount++
 				}
+				lastAssistantText = turn.resolveFallback(lastAssistantText)
 			case "user":
 				if b.handleUser(msg, msgCh) {
 					sawAsyncLaunch = true
@@ -198,6 +253,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 				sawResult = true
 				finalResultText = msg.ResultText
 				resultIsError = msg.IsError
+				terminalReasonError = claudeTerminalReasonFailure(msg.TerminalReason, msg.ResultText)
 				sessionID = msg.SessionID
 				if resultUsage := claudeResultUsage(msg, opts.Model); len(resultUsage) > 0 {
 					usage = resultUsage
@@ -225,8 +281,9 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 
 		closeStdin()
 
-		// Wait for process exit
+		// Wait for process exit, then release the cancellation handler.
 		exitErr := cmd.Wait()
+		close(procDone)
 		duration := time.Since(startTime)
 		// writeDone is buffered (cap 1) and the writer always sends — by the
 		// time cmd has exited, the prompt write has either succeeded, hit a
@@ -245,11 +302,12 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			exitErr,
 			sessionID,
 			streamTerminalState{
-				lastAssistantText: lastAssistantText,
-				finalResultText:   finalResultText,
-				sawResult:         sawResult,
-				resultIsError:     resultIsError,
-				scanErr:           scanErr,
+				lastAssistantText:   lastAssistantText,
+				finalResultText:     finalResultText,
+				sawResult:           sawResult,
+				resultIsError:       resultIsError,
+				scanErr:             scanErr,
+				terminalReasonError: terminalReasonError,
 			},
 			completionGuardError,
 		)
@@ -277,37 +335,45 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			resultBytes:                len(finalResultText),
 			lastAssistantBytes:         len(lastAssistantText),
 			scannerError:               scanErr != nil,
+			unreadableAssistantCount:   unreadableAssistantCount,
 			anthropicBaseURLConfigured: strings.TrimSpace(b.cfg.Env["ANTHROPIC_BASE_URL"]) != "",
 		})
 
 		b.cfg.Logger.Info("claude finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
-		reportedSessionID := resolveSessionID(opts.ResumeSessionID, sessionID, finalStatus == "failed", stderrTail)
-		if reportedSessionID != sessionID {
-			b.cfg.Logger.Info("claude resume did not land; clearing fresh session id for daemon fallback",
+		// The account-binding 400 arrives in the result event (finalError);
+		// "no conversation found" is printed to stderr. Check both.
+		resumeRejected := resumeWasRejected(opts.ResumeSessionID, sessionID, finalStatus == "failed", finalError, stderrTail)
+		reportedSessionID := resolveSessionID(opts.ResumeSessionID, sessionID, finalStatus == "failed", finalError, stderrTail)
+		if resumeRejected {
+			b.cfg.Logger.Info("claude resume was rejected; dropping session id and signalling fresh-session retry",
 				"requested_resume", opts.ResumeSessionID,
 				"emitted_session", sessionID,
 			)
 		}
 
 		resCh <- Result{
-			Status:     finalStatus,
-			Output:     finalOutput,
-			Error:      finalError,
-			DurationMs: duration.Milliseconds(),
-			SessionID:  reportedSessionID,
-			Usage:      usage,
+			Status:         finalStatus,
+			Output:         finalOutput,
+			Error:          finalError,
+			DurationMs:     duration.Milliseconds(),
+			SessionID:      reportedSessionID,
+			Usage:          usage,
+			ResumeRejected: resumeRejected,
 		}
 	}()
 
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
-func (b *claudeBackend) handleAssistant(msg claudeSDKMessage, ch chan<- Message, usage map[string]TokenUsage) (string, int) {
+func (b *claudeBackend) handleAssistant(msg claudeSDKMessage, ch chan<- Message, usage map[string]TokenUsage) assistantTurn {
 	var content claudeMessageContent
 	if err := json.Unmarshal(msg.Message, &content); err != nil {
-		return "", 0
+		// Unreadable body: understood stays false so the caller drops any
+		// fallback rather than let an older turn stand in for this one.
+		return assistantTurn{}
 	}
+	turn := assistantTurn{understood: true}
 	var assistantText strings.Builder
 	toolUseCount := 0
 
@@ -344,9 +410,17 @@ func (b *claudeBackend) handleAssistant(msg claudeSDKMessage, ch chan<- Message,
 				CallID: block.ID,
 				Input:  input,
 			})
+		default:
+			// A block type we do not render may be carrying the model's answer
+			// in a shape we cannot read, so we must not claim this turn was
+			// silent. Recognising a new no-text block is a deliberate one-line
+			// addition here, not an accident of falling through.
+			turn.understood = false
 		}
 	}
-	return assistantText.String(), toolUseCount
+	turn.text = assistantText.String()
+	turn.toolUses = toolUseCount
+	return turn
 }
 
 func (b *claudeBackend) handleUser(msg claudeSDKMessage, ch chan<- Message) bool {
@@ -473,12 +547,16 @@ type claudeSDKMessage struct {
 	Model     string          `json:"model,omitempty"`
 
 	// result fields
-	ResultText string                            `json:"result,omitempty"`
-	IsError    bool                              `json:"is_error,omitempty"`
-	DurationMs float64                           `json:"duration_ms,omitempty"`
-	NumTurns   int                               `json:"num_turns,omitempty"`
-	Usage      *claudeUsage                      `json:"usage,omitempty"`
-	ModelUsage map[string]claudeResultModelUsage `json:"modelUsage,omitempty"`
+	ResultText string `json:"result,omitempty"`
+	IsError    bool   `json:"is_error,omitempty"`
+	// TerminalReason is Claude Code's structured statement of why the turn
+	// ended. Read separately from IsError because the CLI computes the two
+	// independently — see claudeTerminalReasonFailure.
+	TerminalReason string                            `json:"terminal_reason,omitempty"`
+	DurationMs     float64                           `json:"duration_ms,omitempty"`
+	NumTurns       int                               `json:"num_turns,omitempty"`
+	Usage          *claudeUsage                      `json:"usage,omitempty"`
+	ModelUsage     map[string]claudeResultModelUsage `json:"modelUsage,omitempty"`
 
 	// log fields
 	Log *claudeLogEntry `json:"log,omitempty"`
@@ -512,6 +590,38 @@ type claudeResultModelUsage struct {
 	OutputTokens             int64 `json:"outputTokens"`
 	CacheReadInputTokens     int64 `json:"cacheReadInputTokens"`
 	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
+}
+
+// claudeTerminalReasonFailure turns Claude Code's structured terminal_reason
+// into an error string when the reason means the turn did not actually produce
+// an answer, and returns "" when it says nothing of the sort.
+//
+// Only prompt_too_long is recognised, and deliberately so. Every other terminal
+// reason the CLI can report either already arrives with is_error set (api_error,
+// model_error, error_max_turns …) or is a legitimate completion, so widening
+// this would second-guess a contract that works — while prompt_too_long is the
+// one case observed reaching the platform as a clean success (GH #6402). The
+// CLI computes is_error from whether the last message it rendered was an API
+// error and terminal_reason from why the turn stopped; when compaction fails
+// and the run ends on a message that is not itself flagged, the two disagree
+// and only terminal_reason is telling the truth.
+//
+// The returned text quotes the enum token so taskfailure.Classify lands it in
+// agent_error.context_overflow without depending on the CLI's prose, which
+// varies by release and is empty in some shapes. That reason is on the resume
+// blacklist (GetLastTaskSession / GetLastChatTaskSession), so the saturated
+// session is retired and the next task on the issue starts fresh — the
+// automated form of the transcript-archiving workaround #6402 reported.
+func claudeTerminalReasonFailure(terminalReason, resultText string) string {
+	if strings.TrimSpace(terminalReason) != taskfailure.TerminalReasonPromptTooLong {
+		return ""
+	}
+	msg := "claude ended the turn with terminal_reason=" + taskfailure.TerminalReasonPromptTooLong +
+		": the session's context window is exhausted and compaction could not recover it"
+	if detail := strings.TrimSpace(resultText); detail != "" {
+		msg += " (" + detail + ")"
+	}
+	return msg
 }
 
 func claudeResultUsage(msg claudeSDKMessage, fallbackModel string) map[string]TokenUsage {
@@ -604,31 +714,20 @@ var claudeBlockedArgs = map[string]blockedArgMode{
 	"--effort": blockedWithValue,
 }
 
-func buildClaudeArgs(opts ExecOptions, logger *slog.Logger, variant string) []string {
-	var args []string
-	switch variant {
-	case "qwen":
-		args = []string{
-			"-p",
-			"--output-format", "stream-json",
-			"--input-format", "stream-json",
-			"--yolo",
-		}
-	default:
-		args = []string{
-			"-p",
-			"--output-format", "stream-json",
-			"--input-format", "stream-json",
-			"--verbose",
-			"--permission-mode", "bypassPermissions",
-			// AskUserQuestion is Claude Code's built-in interactive question tool.
-			// The daemon runs Claude in non-interactive stream-json mode and has
-			// no UI for the prompt to render in, so a call returns an empty
-			// answer and the agent ends up "inferring" silently — the user
-			// never sees the question (see GitHub #2588). User-facing
-			// clarification belongs in an issue comment instead.
-			"--disallowedTools", "AskUserQuestion",
-		}
+func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--input-format", "stream-json",
+		"--verbose",
+		"--permission-mode", "bypassPermissions",
+		// AskUserQuestion is Claude Code's built-in interactive question tool.
+		// The daemon runs Claude in non-interactive stream-json mode and has
+		// no UI for the prompt to render in, so a call returns an empty
+		// answer and the agent ends up "inferring" silently — the user
+		// never sees the question (see GitHub #2588). User-facing
+		// clarification belongs in an issue comment instead.
+		"--disallowedTools", "AskUserQuestion",
 	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		// A saved agent-level config is authoritative, including an explicitly
@@ -649,14 +748,29 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger, variant string) []st
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
-	if opts.SystemPrompt != "" {
-		args = append(args, "--append-system-prompt", opts.SystemPrompt)
-	}
+	// SystemPrompt is intentionally not forwarded as --append-system-prompt:
+	// Claude Code loads the per-task CLAUDE.md the daemon writes into the
+	// workdir, so inlining the same runtime brief would duplicate it on every
+	// turn. Verified against Claude Code 2.1.220 (MUL-5392).
 	if opts.ResumeSessionID != "" {
 		args = append(args, "--resume", opts.ResumeSessionID)
 	}
-	args = append(args, filterCustomArgs(opts.ExtraArgs, claudeBlockedArgs, logger)...)
-	args = append(args, filterCustomArgs(opts.CustomArgs, claudeBlockedArgs, logger)...)
+	blockedArgs := claudeBlockedArgs
+	if opts.ClaudeSettingsPath != "" {
+		// The daemon-owned --settings file is the enforcement layer for disabled
+		// inherited skills. Drop competing per-agent/default flags only while that
+		// policy is active, then append the managed file last.
+		blockedArgs = make(map[string]blockedArgMode, len(claudeBlockedArgs)+1)
+		for key, mode := range claudeBlockedArgs {
+			blockedArgs[key] = mode
+		}
+		blockedArgs["--settings"] = blockedWithValue
+	}
+	args = append(args, filterCustomArgs(opts.ExtraArgs, blockedArgs, logger)...)
+	args = append(args, filterCustomArgs(opts.CustomArgs, blockedArgs, logger)...)
+	if opts.ClaudeSettingsPath != "" {
+		args = append(args, "--settings", opts.ClaudeSettingsPath)
+	}
 	return args
 }
 
@@ -691,29 +805,76 @@ func buildClaudeInput(prompt string) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// resolveSessionID decides which session id to report on the Result. When the
-// caller requested --resume but claude emitted a fresh, different session id
-// AND the run failed, the resume did not land. Claude can also report the
-// requested id while printing "No conversation found with session ID: ..." to
-// stderr. Returning "" in those cases keeps the daemon's retry-with-fresh-
-// session fallback able to trigger instead of persisting the dead resume id.
-func resolveSessionID(requestedResume, emitted string, failed bool, stderrTail ...string) string {
-	if failed && requestedResume != "" && claudeNoConversationFound(stderrTail...) {
-		return ""
+// resumeRejectedPhrases are the provider messages that positively identify a
+// refused resume, as opposed to a failure that merely happened to occur during
+// a resumed run. Shared by the stream-json backends (claude, codebuddy, qwen);
+// the ACP backends match structured error codes via isACPSessionNotFound
+// instead.
+//
+// Matching must stay tight: a false positive makes the daemon throw away a
+// recoverable session pointer and re-run the task, so anything ambiguous
+// belongs out of this list.
+var resumeRejectedPhrases = []string{
+	// Verified: claude prints this when the transcript named by --resume is
+	// absent. Covered by TestResolveSessionID's existing stderr fixture.
+	"no conversation found",
+	// Verified: qwen-code 0.20.0, captured in
+	// testdata/qwen-code-0.20.0-resume-not-found.stderr.txt — "No saved
+	// session found with ID <id>. Run `qwen --resume` without an ID to
+	// choose from existing sessions."
+	"no saved session found",
+	// Reported verbatim in multica-ai/multica#5704 against Claude Code
+	// 2.1.207 (zh-CN): "400 此 session 已绑定另外的ai账号，请执行 /new 开启新
+	// session". This is the account-switch guardrail this signal exists for.
+	"已绑定另外",
+	// INFERRED, not yet observed: the en-US wording of the same guardrail has
+	// not been captured. These are guesses derived from the zh-CN text and
+	// should be corrected once a real English sample is available. A miss
+	// here degrades to a terminal failure carrying the provider's raw error,
+	// which is diagnosable — it does not silently mis-route the run.
+	"bound to another account",
+	"bound to a different account",
+}
+
+// resumeWasRejected reports whether a failed run's --resume was itself
+// refused. It is the positive-evidence predicate behind Result.ResumeRejected:
+// only a rejected resume can be cured by starting a fresh session.
+//
+// texts should include every place the provider may have written the reason —
+// the final error string and the stderr tail — because the account-binding 400
+// arrives in the stream-json result event while "no conversation found" is
+// printed to stderr.
+func resumeWasRejected(requestedResume, emitted string, failed bool, texts ...string) bool {
+	if !failed || requestedResume == "" {
+		return false
 	}
-	if failed && requestedResume != "" && emitted != "" && emitted != requestedResume {
+	for _, text := range texts {
+		lower := strings.ToLower(text)
+		for _, phrase := range resumeRejectedPhrases {
+			if strings.Contains(lower, phrase) {
+				return true
+			}
+		}
+	}
+	// Claude answered with a different session than the one we asked to
+	// continue: the requested transcript did not load.
+	return emitted != "" && emitted != requestedResume
+}
+
+// resolveSessionID decides which session id to report on the Result. A session
+// known to be dead must not be persisted as the resume pointer, so a rejected
+// resume reports "" regardless of what claude echoed back.
+//
+// This is deliberately no longer the signal the daemon reads to decide *why*
+// a run failed — Result.ResumeRejected carries that. An empty SessionID is
+// also produced by any failure before the first stream message (a 401, a
+// missing binary), which is why inferring "the resume was rejected" from it
+// was wrong in both directions.
+func resolveSessionID(requestedResume, emitted string, failed bool, texts ...string) string {
+	if resumeWasRejected(requestedResume, emitted, failed, texts...) {
 		return ""
 	}
 	return emitted
-}
-
-func claudeNoConversationFound(stderrTail ...string) bool {
-	for _, tail := range stderrTail {
-		if strings.Contains(strings.ToLower(tail), "no conversation found") {
-			return true
-		}
-	}
-	return false
 }
 
 func buildEnv(extra map[string]string) []string {

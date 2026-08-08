@@ -16,6 +16,7 @@ import {
   invalidateStaleListKeys,
   rollbackIssueChange,
   type IssueFlatCache,
+  type IssueTableRowCache,
 } from "./cache-coordinator";
 import { issueChangedDims } from "./surface/membership";
 import {
@@ -38,8 +39,9 @@ import { useRecentIssuesStore } from "./stores";
 import type { GroupedIssuesResponse, InboxItem, Issue, IssueAssigneeGroup, IssueReaction, IssueStatus } from "../types";
 import type {
   CreateIssueRequest,
-  UpdateIssueRequest,
   ListIssuesCache,
+  MoveIssueRequest,
+  UpdateIssueRequest,
 } from "../types";
 import type { TimelineEntry, IssueSubscriber, Reaction } from "../types";
 import { sortTimelineEntriesAsc } from "./timeline-sort";
@@ -59,6 +61,15 @@ export type ToggleIssueReactionVars = {
   emoji: string;
   existing: IssueReaction | undefined;
 };
+
+export type UpdateIssueMutationInput = {
+  id: string;
+  /**
+   * Present only for drag/drop. `position` remains in the optimistic patch,
+   * while the request sent to the server contains relative anchors instead.
+   */
+  move_intent?: Pick<MoveIssueRequest, "before_id" | "after_id">;
+} & UpdateIssueRequest;
 
 // ---------------------------------------------------------------------------
 // Per-status pagination
@@ -208,6 +219,7 @@ export function useCreateIssue() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.flatAll(wsId) });
+      qc.invalidateQueries({ queryKey: issueKeys.tableAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.projectGanttAll(wsId) });
@@ -220,14 +232,25 @@ export function useUpdateIssue() {
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
   return useMutation({
-    mutationFn: ({ id, ...data }: { id: string } & UpdateIssueRequest) =>
-      api.updateIssue(id, data),
-    onMutate: ({ id, ...data }) => {
+    mutationFn: ({ id, move_intent: moveIntent, ...data }: UpdateIssueMutationInput) => {
+      if (!moveIntent) return api.updateIssue(id, data);
+      const { position: _optimisticPosition, ...target } = data;
+      return api.moveIssue(id, { ...target, ...moveIntent });
+    },
+    onMutate: ({ id, move_intent: _moveIntent, ...data }) => {
       // suppress_run / handoff_note are write-time control fields, not Issue
-      // columns — they steer enqueue/injection on the server and must never be
-      // written into the query cache (MUL-3375). Strip them from the patch; the
-      // mutationFn above still sends the full payload to the API.
-      const { suppress_run: _suppressRun, handoff_note: _handoffNote, ...patch } = data;
+      // columns. description_base is merge metadata, while description itself
+      // is resolved against that base on the server and therefore is not safe
+      // to predict optimistically. Keep the authoritative raw description in
+      // cache so hidden channel-media markers remain available as the base for
+      // a rapid follow-up edit. mutationFn still sends the full payload.
+      const {
+        suppress_run: _suppressRun,
+        handoff_note: _handoffNote,
+        description: _description,
+        description_base: _descriptionBase,
+        ...patch
+      } = data;
       // Fire-and-forget cancelQueries — keeps onMutate synchronous so the
       // cache update happens in the same tick as mutate(). Awaiting would
       // yield to the event loop, letting @dnd-kit reset its visual state
@@ -235,6 +258,7 @@ export function useUpdateIssue() {
       qc.cancelQueries({ queryKey: issueKeys.list(wsId) });
       qc.cancelQueries({ queryKey: issueKeys.myAll(wsId) });
       qc.cancelQueries({ queryKey: issueKeys.flatAll(wsId) });
+      qc.cancelQueries({ queryKey: issueKeys.tableAll(wsId) });
       if (patch.status !== undefined) {
         qc.cancelQueries({ queryKey: inboxKeys.list(wsId) });
       }
@@ -319,7 +343,14 @@ export function useUpdateIssue() {
       // optimistically; against the post-write entity the changed dims come
       // out false unless the server coerced a different value, so this pass
       // is the plain surgical patch it always was.
-      const { suppress_run: _suppressRun, handoff_note: _handoffNote, id: _id, ...intent } = vars;
+      const {
+        suppress_run: _suppressRun,
+        handoff_note: _handoffNote,
+        description_base: _descriptionBase,
+        move_intent: _moveIntent,
+        id: _id,
+        ...intent
+      } = vars;
       // Drop `properties` from the reconcile payload: the bag is owned by the
       // property mutation pipeline (single-key atomic writes + its own
       // optimistic state). An UpdateIssue snapshot taken before a concurrent
@@ -349,6 +380,7 @@ export function useUpdateIssue() {
           vars.status !== undefined ||
           Object.prototype.hasOwnProperty.call(vars, "project_id"),
       });
+      qc.invalidateQueries({ queryKey: issueKeys.tableAll(wsId) });
       if (ctx) {
         invalidateStaleListKeys(qc, ctx.change.staleKeys);
       }
@@ -465,6 +497,7 @@ export function useDeleteIssue() {
     onSettled: (_data, _err, _id, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.flatAll(wsId) });
+      qc.invalidateQueries({ queryKey: issueKeys.tableAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.projectGanttAll(wsId) });
@@ -486,12 +519,21 @@ export function useBatchUpdateIssues() {
       updates: UpdateIssueRequest;
     }) => api.batchUpdateIssues(ids, updates),
     onMutate: async ({ ids, updates }) => {
-      // Control fields steer the server; they are not Issue columns and must
-      // not enter the cache (MUL-3375). mutationFn still sends them.
-      const { suppress_run: _suppressRun, handoff_note: _handoffNote, ...patch } = updates;
+      // Control and description-merge fields are not safe optimistic cache
+      // patches. The server resolves description against description_base, so
+      // preserve the authoritative raw description (including media markers)
+      // until a refetch returns the committed result.
+      const {
+        suppress_run: _suppressRun,
+        handoff_note: _handoffNote,
+        description: _description,
+        description_base: _descriptionBase,
+        ...patch
+      } = updates;
       await qc.cancelQueries({ queryKey: issueKeys.list(wsId) });
       await qc.cancelQueries({ queryKey: issueKeys.myAll(wsId) });
       await qc.cancelQueries({ queryKey: issueKeys.flatAll(wsId) });
+      await qc.cancelQueries({ queryKey: issueKeys.tableAll(wsId) });
       if (patch.status !== undefined) {
         await qc.cancelQueries({ queryKey: inboxKeys.list(wsId) });
       }
@@ -504,6 +546,10 @@ export function useBatchUpdateIssues() {
       // first snapshot per key is pristine for rollback.
       const prevListByHash = new Map<string, [QueryKey, ListIssuesCache]>();
       const prevFlatListByHash = new Map<string, [QueryKey, IssueFlatCache]>();
+      const prevTableRowByHash = new Map<
+        string,
+        [QueryKey, IssueTableRowCache]
+      >();
       const prevDetailById = new Map<string, Issue>();
       let prevInboxList: InboxItem[] | undefined;
       const staleKeys: QueryKey[] = [];
@@ -521,6 +567,12 @@ export function useBatchUpdateIssues() {
           const hash = hashKey(key);
           if (!prevFlatListByHash.has(hash)) {
             prevFlatListByHash.set(hash, [key, snapshot]);
+          }
+        }
+        for (const [key, snapshot] of change.prevTableRows) {
+          const hash = hashKey(key);
+          if (!prevTableRowByHash.has(hash)) {
+            prevTableRowByHash.set(hash, [key, snapshot]);
           }
         }
         if (change.prevDetail) prevDetailById.set(id, change.prevDetail);
@@ -552,6 +604,7 @@ export function useBatchUpdateIssues() {
       return {
         prevLists: [...prevListByHash.values()],
         prevFlatLists: [...prevFlatListByHash.values()],
+        prevTableRows: [...prevTableRowByHash.values()],
         prevDetailById,
         prevInboxList,
         staleKeys,
@@ -567,6 +620,11 @@ export function useBatchUpdateIssues() {
       }
       if (ctx?.prevFlatLists) {
         for (const [key, snapshot] of ctx.prevFlatLists) {
+          qc.setQueryData(key, snapshot);
+        }
+      }
+      if (ctx?.prevTableRows) {
+        for (const [key, snapshot] of ctx.prevTableRows) {
           qc.setQueryData(key, snapshot);
         }
       }
@@ -598,6 +656,7 @@ export function useBatchUpdateIssues() {
           _vars.updates.status !== undefined ||
           Object.prototype.hasOwnProperty.call(_vars.updates, "project_id"),
       });
+      qc.invalidateQueries({ queryKey: issueKeys.tableAll(wsId) });
       if (ctx) {
         invalidateStaleListKeys(qc, ctx.staleKeys);
       }
@@ -733,6 +792,7 @@ export function useBatchDeleteIssues() {
     onSettled: (_data, _err, _ids, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.flatAll(wsId) });
+      qc.invalidateQueries({ queryKey: issueKeys.tableAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
       qc.invalidateQueries({ queryKey: issueKeys.projectGanttAll(wsId) });
@@ -1085,6 +1145,30 @@ export function useToggleIssueSubscriber(issueId: string) {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: issueKeys.subscribers(issueId) });
+    },
+  });
+}
+
+/**
+ * Leave an issue AND its whole sub-tree (MUL-5483). Not optimistic: it writes
+ * to an unknown number of other issues' subscriber lists, so there is nothing
+ * determinate to patch — invalidate every subscriber query instead and let the
+ * server be the source of truth.
+ */
+export function useUnsubscribeFromIssueSubtree(issueId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      userId,
+      userType,
+    }: {
+      userId: string;
+      userType: "member" | "agent";
+    }) => {
+      await api.unsubscribeFromIssueSubtree(issueId, userId, userType);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: issueKeys.subscribersAll() });
     },
   });
 }

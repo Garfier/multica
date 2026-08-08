@@ -403,6 +403,7 @@ describe("useUpdateIssue — optimistic move keeps every bucketed board in sync"
 
   let qc: QueryClient;
   let updateIssue: ReturnType<typeof vi.fn<(id: string, data: unknown) => Promise<Issue>>>;
+  let moveIssue: ReturnType<typeof vi.fn<(id: string, data: unknown) => Promise<Issue>>>;
 
   function makeBucketed(): ListIssuesCache {
     return {
@@ -430,7 +431,8 @@ describe("useUpdateIssue — optimistic move keeps every bucketed board in sync"
   beforeEach(() => {
     qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     updateIssue = vi.fn();
-    setApiInstance({ updateIssue } as unknown as ApiClient);
+    moveIssue = vi.fn();
+    setApiInstance({ updateIssue, moveIssue } as unknown as ApiClient);
     qc.setQueryData<ListIssuesCache>(wsKey, makeBucketed());
     qc.setQueryData<ListIssuesCache>(myKey, makeBucketed());
     qc.setQueryData<ListIssuesCache>(projectKey, makeBucketed());
@@ -475,6 +477,76 @@ describe("useUpdateIssue — optimistic move keeps every bucketed board in sync"
     for (const key of [wsKey, myKey, projectKey]) {
       expect(bucketIds(key, "in_progress")).toEqual(["issue-1"]);
     }
+  });
+
+  it("keeps the authoritative description base while a description update is pending", async () => {
+    let resolve!: (issue: Issue) => void;
+    updateIssue.mockReturnValue(
+      new Promise<Issue>((r) => {
+        resolve = r;
+      }),
+    );
+    const detailKey = issueKeys.detail(WS_ID, "issue-1");
+    qc.setQueryData<Issue>(detailKey, makeIssue(1, { description: "base" }));
+    const { result } = renderHook(() => useUpdateIssue(), {
+      wrapper: createWrapper(qc),
+    });
+
+    act(() => {
+      result.current.mutate({
+        id: "issue-1",
+        description: "local edit",
+        description_base: "base",
+      });
+    });
+
+    await waitFor(() => {
+      expect(updateIssue).toHaveBeenCalledWith("issue-1", {
+        description: "local edit",
+        description_base: "base",
+      });
+    });
+    const optimistic = qc.getQueryData<Issue & { description_base?: string }>(detailKey);
+    expect(optimistic?.description).toBe("base");
+    expect(optimistic).not.toHaveProperty("description_base");
+
+    await act(async () => {
+      resolve(makeIssue(1, { description: "local edit" }));
+    });
+    expect(qc.getQueryData<Issue>(detailKey)?.description).toBe("local edit");
+  });
+
+  it("uses server move intent while keeping provisional position optimistic-only", async () => {
+    moveIssue.mockResolvedValue(
+      makeIssue(1, { status: "in_progress", position: 15 }),
+    );
+    const { result } = renderHook(() => useUpdateIssue(), {
+      wrapper: createWrapper(qc),
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        id: "issue-1",
+        status: "in_progress",
+        position: 12,
+        move_intent: {
+          before_id: "issue-0",
+          after_id: "issue-2",
+        },
+      });
+    });
+
+    expect(moveIssue).toHaveBeenCalledWith("issue-1", {
+      status: "in_progress",
+      before_id: "issue-0",
+      after_id: "issue-2",
+    });
+    expect(updateIssue).not.toHaveBeenCalled();
+    expect(
+      qc
+        .getQueryData<ListIssuesCache>(wsKey)
+        ?.byStatus.in_progress?.issues[0]?.position,
+    ).toBe(15);
   });
 
   it("optimistically patches the linked inbox row status and reconciles with the server response", async () => {
@@ -775,6 +847,48 @@ describe("useBatchUpdateIssues — optimistic patch covers filtered boards too",
     for (const key of [wsKey, myKey]) {
       expect(bucketIds(key, "in_progress")).toEqual(["issue-1"]);
     }
+  });
+
+  it("does not optimistically replace description merge bases", async () => {
+    let resolve!: (r: { updated: number }) => void;
+    batchUpdateIssues.mockReturnValue(
+      new Promise<{ updated: number }>((r) => {
+        resolve = r;
+      }),
+    );
+    const detailKey = issueKeys.detail(WS_ID, "issue-1");
+    qc.setQueryData<Issue>(
+      detailKey,
+      makeIssue(1, { description: "base with marker" }),
+    );
+
+    const { result } = renderHook(() => useBatchUpdateIssues(), {
+      wrapper: createWrapper(qc),
+    });
+
+    act(() => {
+      result.current.mutate({
+        ids: ["issue-1"],
+        updates: {
+          description: "local edit",
+          description_base: "base with marker",
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(batchUpdateIssues).toHaveBeenCalledWith(["issue-1"], {
+        description: "local edit",
+        description_base: "base with marker",
+      });
+    });
+    expect(qc.getQueryData<Issue>(detailKey)?.description).toBe(
+      "base with marker",
+    );
+
+    await act(async () => {
+      resolve({ updated: 1 });
+    });
   });
 
   it("rolls both caches back when the request fails", async () => {

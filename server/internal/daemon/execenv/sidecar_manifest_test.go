@@ -153,8 +153,11 @@ var allFileBasedProviders = []string{
 	"pi",
 	"cursor",
 	"kimi",
+	"reasonix",
 	"kiro",
 	"antigravity",
+	"qwen",
+	"qwenpaw",
 }
 
 // TestPrepareThenCleanupSidecarsRoundTripEmptyWorkdir is the headline
@@ -231,8 +234,10 @@ func TestPrepareThenCleanupSidecarsPreservesUserSkillSibling(t *testing.T) {
 		{"pi", filepath.Join(".pi", "skills", "my-own"), "SKILL.md"},
 		{"cursor", filepath.Join(".cursor", "skills", "my-own"), "SKILL.md"},
 		{"kimi", filepath.Join(".kimi", "skills", "my-own"), "SKILL.md"},
+		{"reasonix", filepath.Join(".reasonix", "skills", "my-own"), "SKILL.md"},
 		{"kiro", filepath.Join(".kiro", "skills", "my-own"), "SKILL.md"},
 		{"antigravity", filepath.Join(".agents", "skills", "my-own"), "SKILL.md"},
+		{"qwen", filepath.Join(".qwen", "skills", "my-own"), "SKILL.md"},
 		{"hermes", filepath.Join(".agent_context", "skills", "my-own"), "SKILL.md"},
 	}
 	for _, tc := range cases {
@@ -295,8 +300,10 @@ func TestPrepareThenCleanupSidecarsPreservesUnrelatedUserFiles(t *testing.T) {
 		{"pi", filepath.Join(".pi", "config.toml")},
 		{"cursor", filepath.Join(".cursor", "settings.json")},
 		{"kimi", filepath.Join(".kimi", "config.json")},
+		{"reasonix", filepath.Join(".reasonix", "config.toml")},
 		{"kiro", filepath.Join(".kiro", "config.json")},
 		{"antigravity", filepath.Join(".agents", "config.json")},
+		{"qwen", filepath.Join(".qwen", "settings.json")},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -623,8 +630,10 @@ var sameSlugSkillProviderCases = []struct {
 	{"pi", filepath.Join(".pi", "skills", "issue-review")},
 	{"cursor", filepath.Join(".cursor", "skills", "issue-review")},
 	{"kimi", filepath.Join(".kimi", "skills", "issue-review")},
+	{"reasonix", filepath.Join(".reasonix", "skills", "issue-review")},
 	{"kiro", filepath.Join(".kiro", "skills", "issue-review")},
 	{"antigravity", filepath.Join(".agents", "skills", "issue-review")},
+	{"qwen", filepath.Join(".qwen", "skills", "issue-review")},
 	{"hermes", filepath.Join(".agent_context", "skills", "issue-review")},
 }
 
