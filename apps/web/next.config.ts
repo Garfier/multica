@@ -65,6 +65,10 @@ const nextConfig: NextConfig = {
           source: "/uploads/:path*",
           destination: `${remoteApiUrl}/uploads/:path*`,
         },
+        {
+          source: "/health",
+          destination: `${remoteApiUrl}/health`,
+        },
       ],
       fallback: [],
     };

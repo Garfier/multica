@@ -317,7 +317,7 @@ func TestTrySendDropsWhenFull(t *testing.T) {
 func TestBuildClaudeArgsInheritsMCPByDefault(t *testing.T) {
 	t.Parallel()
 
-	args := buildClaudeArgs(ExecOptions{}, slog.Default())
+	args := buildClaudeArgs(ExecOptions{}, slog.Default(), "")
 	expected := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -340,7 +340,7 @@ func TestBuildClaudeArgsInheritsMCPByDefault(t *testing.T) {
 func TestBuildClaudeArgsUsesStrictMCPForManagedConfig(t *testing.T) {
 	t.Parallel()
 
-	args := buildClaudeArgs(ExecOptions{McpConfig: json.RawMessage(`{}`)}, slog.Default())
+	args := buildClaudeArgs(ExecOptions{McpConfig: json.RawMessage(`{}`)}, slog.Default(), "")
 	if !slices.Contains(args, "--strict-mcp-config") {
 		t.Fatalf("managed MCP config must enable strict mode, got %v", args)
 	}
@@ -491,7 +491,7 @@ func TestBuildClaudeArgsPassesThroughCustomArgs(t *testing.T) {
 
 	args := buildClaudeArgs(ExecOptions{
 		CustomArgs: []string{"--max-turns", "50", "--verbose"},
-	}, slog.Default())
+	}, slog.Default(), "")
 
 	// Custom args should appear at the end
 	found := 0
@@ -510,7 +510,7 @@ func TestBuildClaudeArgsFiltersBlockedCustomArgs(t *testing.T) {
 
 	args := buildClaudeArgs(ExecOptions{
 		CustomArgs: []string{"--output-format", "text", "--model", "o3"},
-	}, slog.Default())
+	}, slog.Default(), "")
 
 	// --output-format text should be stripped
 	for _, a := range args[len(args)-2:] {
@@ -754,7 +754,7 @@ func TestBuildClaudeArgsBlocksMcpConfig(t *testing.T) {
 	// --mcp-config is hardcoded by the daemon — it must not be overridable via custom_args.
 	args := buildClaudeArgs(ExecOptions{
 		CustomArgs: []string{"--mcp-config", "/tmp/evil.json", "--model", "o3"},
-	}, slog.Default())
+	}, slog.Default(), "")
 
 	for i, a := range args {
 		if a == "--mcp-config" {
@@ -1009,7 +1009,7 @@ func TestBuildClaudeArgsExtraArgsBeforeCustomArgsAndFiltersBoth(t *testing.T) {
 	args := buildClaudeArgs(ExecOptions{
 		ExtraArgs:  []string{"--output-format", "text", "--max-budget-usd", "1.00"},
 		CustomArgs: []string{"--max-budget-usd", "2.00", "--permission-mode", "plan"},
-	}, slog.Default())
+	}, slog.Default(), "")
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--output-format text") || strings.Contains(joined, "--permission-mode plan") {
 		t.Fatalf("blocked args should be filtered from both layers: %v", args)

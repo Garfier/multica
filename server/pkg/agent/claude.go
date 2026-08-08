@@ -17,8 +17,10 @@ import (
 
 // claudeBackend implements Backend by spawning the Claude Code CLI
 // with --output-format stream-json.
+// variant controls CLI arg generation: "" (claude), "qwen", "qoder".
 type claudeBackend struct {
-	cfg Config
+	cfg     Config
+	variant string
 }
 
 func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
@@ -33,7 +35,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	timeout := opts.Timeout
 	runCtx, cancel := runContext(ctx, timeout)
 
-	args := buildClaudeArgs(opts, b.cfg.Logger)
+	args := buildClaudeArgs(opts, b.cfg.Logger, b.variant)
 
 	// If the caller provided an MCP config, write it to a temp file and pass
 	// --mcp-config <path> so the agent uses a controlled set of MCP servers
@@ -602,20 +604,31 @@ var claudeBlockedArgs = map[string]blockedArgMode{
 	"--effort": blockedWithValue,
 }
 
-func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--verbose",
-		"--permission-mode", "bypassPermissions",
-		// AskUserQuestion is Claude Code's built-in interactive question tool.
-		// The daemon runs Claude in non-interactive stream-json mode and has
-		// no UI for the prompt to render in, so a call returns an empty
-		// answer and the agent ends up "inferring" silently — the user
-		// never sees the question (see GitHub #2588). User-facing
-		// clarification belongs in an issue comment instead.
-		"--disallowedTools", "AskUserQuestion",
+func buildClaudeArgs(opts ExecOptions, logger *slog.Logger, variant string) []string {
+	var args []string
+	switch variant {
+	case "qwen":
+		args = []string{
+			"-p",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--yolo",
+		}
+	default:
+		args = []string{
+			"-p",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--verbose",
+			"--permission-mode", "bypassPermissions",
+			// AskUserQuestion is Claude Code's built-in interactive question tool.
+			// The daemon runs Claude in non-interactive stream-json mode and has
+			// no UI for the prompt to render in, so a call returns an empty
+			// answer and the agent ends up "inferring" silently — the user
+			// never sees the question (see GitHub #2588). User-facing
+			// clarification belongs in an issue comment instead.
+			"--disallowedTools", "AskUserQuestion",
+		}
 	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		// A saved agent-level config is authoritative, including an explicitly

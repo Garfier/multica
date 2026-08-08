@@ -376,6 +376,16 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			finalError = fmt.Sprintf("pi exited with error: %v", waitErr)
 		}
 
+		// Pi may exit 0 with no output when the model returns an API error
+		// (e.g. quota exceeded). Surface the error from the session file so
+		// the UI shows something instead of an empty "completed" task.
+		if finalStatus == "completed" && output.Len() == 0 {
+			if errMsg := piSessionLastError(sessionPath); errMsg != "" {
+				finalStatus = "failed"
+				finalError = errMsg
+			}
+		}
+
 		b.cfg.Logger.Info("pi finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
 		resCh <- Result{
@@ -468,6 +478,42 @@ func decodePiResult(raw json.RawMessage) string {
 		return s
 	}
 	return string(raw)
+}
+
+// piSessionLastError scans the Pi session JSONL for the last assistant
+// message that ended in an error (stopReason == "error") and returns its
+// errorMessage. Used to surface API-level failures (e.g. quota exceeded)
+// that Pi exits 0 on without emitting a stream error event.
+func piSessionLastError(sessionPath string) string {
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var lastErr string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 32*1024*1024)
+	for scanner.Scan() {
+		var evt struct {
+			Type    string `json:"type"`
+			Message *struct {
+				Role         string `json:"role"`
+				StopReason   string `json:"stopReason"`
+				ErrorMessage string `json:"errorMessage"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message" && evt.Message != nil &&
+			evt.Message.Role == "assistant" &&
+			evt.Message.StopReason == "error" &&
+			evt.Message.ErrorMessage != "" {
+			lastErr = evt.Message.ErrorMessage
+		}
+	}
+	return lastErr
 }
 
 // ── Arg builder ──
