@@ -17,6 +17,9 @@ COPY packages/eslint-config/package.json packages/eslint-config/
 RUN corepack enable && \
     PNPM_VERSION="$(node -p 'require("./package.json").packageManager')" && \
     corepack prepare "$PNPM_VERSION" --activate
+# The web image never runs the desktop app, so skip electron's ~100MB binary
+# download — it adds minutes and can hang on slow links to GitHub releases.
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 RUN pnpm install --frozen-lockfile
 
 # --- Build ---
