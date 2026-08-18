@@ -661,10 +661,17 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				if resolvedCommandName == "" {
 					resolvedCommandName = profile.CommandName
 				}
+				// Capabilities belong on this row too. It is written AFTER the
+				// successful runtimes in the same request, so its last_seen_at is
+				// the newest for this daemon until the first heartbeat — and the
+				// worktree gates read the newest row. Omitting them made a failed
+				// profile look, for that window, like a daemon that advertises
+				// nothing (and now like a capability-blind server).
 				metadata, _ := json.Marshal(map[string]any{
 					"version":                            "",
 					"cli_version":                        req.CLIVersion,
 					"launched_by":                        req.LaunchedBy,
+					"capabilities":                       requestClientCapabilities(r),
 					"runtime_profile_registration_error": true,
 					"runtime_profile_failure_reason":     reason,
 					"command_name":                       resolvedCommandName,
@@ -1873,73 +1880,6 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	if composioMCPEnabled {
 		resp.ConnectedApps = parseRuntimeConnectedAppsForClaim(task.RuntimeConnectedApps, task.ID)
 	}
-	_, pluginSkillRefs, pluginManifest, pluginErr := h.TaskService.LoadTaskPluginSkillBundles(r.Context(), task.ID)
-	if pluginErr != nil {
-		slog.Error("daemon claim: load pinned plugin contributions failed", "task_id", uuidToString(task.ID), "error", pluginErr)
-		failure := h.failClaimedTaskBeforeLaunch(
-			r.Context(),
-			task,
-			"This task could not start because its pinned Plugin contributions are unavailable. Retry the task; if it fails again, reinstall or re-enable the Plugin.",
-			taskfailure.ReasonSkillBundleUnavailable,
-			"error_plugin_contributions",
-			http.StatusInternalServerError,
-			"pinned plugin contributions are unavailable",
-		)
-		return resp, deliveredCommentIDs, 0, 0, failure
-	}
-	resp.PluginExecutionManifest = pluginManifest
-	remoteConnections, remoteDiagnostics, remoteErr := h.PluginService.ResolveTaskRemoteMCPConnections(r.Context(), task.ID)
-	if remoteErr != nil {
-		slog.Error("daemon claim: resolve pinned Remote MCP contribution failed", "task_id", uuidToString(task.ID), "error", remoteErr)
-		failure := h.failClaimedTaskBeforeLaunch(
-			r.Context(),
-			task,
-			"This task could not start because a required Remote MCP contribution is unavailable. Test the Plugin connection or update its configuration, then retry.",
-			taskfailure.ReasonAgentMissingConfig,
-			"error_required_remote_mcp",
-			http.StatusConflict,
-			"required Remote MCP contribution is unavailable",
-		)
-		return resp, deliveredCommentIDs, 0, 0, failure
-	}
-	if pluginManifest != nil && len(remoteDiagnostics) > 0 {
-		pluginManifest.Diagnostics = append(pluginManifest.Diagnostics, remoteDiagnostics...)
-	}
-	if len(remoteConnections) > 0 && !requestHasClientCapability(r, protocol.DaemonCapabilityRemoteMCPV1) {
-		for _, connection := range remoteConnections {
-			if connection.FailurePolicy == "required" {
-				failure := h.failClaimedTaskBeforeLaunch(
-					r.Context(),
-					task,
-					"This task could not start because its runtime does not support the required Remote MCP contribution. Update the runtime, then retry.",
-					taskfailure.ReasonAgentRuntimeVersionUnsupported,
-					"error_remote_mcp_runtime_incompatible",
-					http.StatusConflict,
-					"runtime does not support this task's required Remote MCP contribution",
-				)
-				return resp, deliveredCommentIDs, 0, 0, failure
-			}
-		}
-		if pluginManifest != nil {
-			pluginManifest.Diagnostics = append(pluginManifest.Diagnostics, "optional Remote MCP contributions omitted because the runtime is incompatible")
-		}
-		remoteConnections = nil
-	}
-	resp.RemoteMCPConnections = remoteConnections
-	if len(pluginSkillRefs) > 0 && (!requestHasClientCapability(r, protocol.DaemonCapabilitySkillBundlesV1) ||
-		!requestHasClientCapability(r, protocol.DaemonCapabilityExecutionManifestV1) ||
-		!requestHasClientCapability(r, protocol.DaemonCapabilityAgentSkillV1)) {
-		failure := h.failClaimedTaskBeforeLaunch(
-			r.Context(),
-			task,
-			"This task could not start because its runtime does not support the Plugin's Skill contribution. Update the runtime, then retry.",
-			taskfailure.ReasonAgentRuntimeVersionUnsupported,
-			"error_plugin_skill_runtime_incompatible",
-			http.StatusConflict,
-			"runtime does not support this task's plugin execution manifest",
-		)
-		return resp, deliveredCommentIDs, 0, 0, failure
-	}
 	if agent, err := h.Queries.GetAgent(r.Context(), task.AgentID); err == nil {
 		useSkillRefs := requestHasClientCapability(r, protocol.DaemonCapabilitySkillBundlesV1)
 		var customEnv map[string]string
@@ -2028,7 +1968,6 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		}
 		if useSkillRefs {
 			_, skillRefs := h.TaskService.LoadAgentSkillBundles(r.Context(), task.AgentID)
-			skillRefs = append(skillRefs, pluginSkillRefs...)
 			agentSkillCount = len(skillRefs)
 			resp.Agent.SkillRefs = skillRefs
 		} else {
@@ -3259,12 +3198,6 @@ func (h *Handler) ResolveTaskSkillBundles(w http.ResponseWriter, r *http.Request
 	}
 
 	bundles, _ := h.TaskService.LoadAgentSkillBundles(r.Context(), task.AgentID)
-	pluginBundles, _, _, err := h.TaskService.LoadTaskPluginSkillBundles(r.Context(), task.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "pinned plugin contributions are unavailable")
-		return
-	}
-	bundles = append(bundles, pluginBundles...)
 	allowed := make(map[string]service.AgentSkillData, len(bundles))
 	for _, bundle := range bundles {
 		allowed[bundle.Source+"\x00"+bundle.ID] = bundle
@@ -3753,6 +3686,24 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 			continue
 		}
 		if isNoteComment(c.Content) {
+			continue
+		}
+		// A delegated failure recovery signal is platform-authored and targets
+		// the exact source coordinator recorded by the failed task. It bypasses
+		// generic comment routing (which deliberately treats system authors as
+		// unattributed) and excludes this just-completed task from the coverage
+		// check because the signal was planned after claim, not delivered to it.
+		if service.IsDelegatedFailureRecoveryComment(c) {
+			if err := h.TaskService.DispatchDelegatedFailureRecoveryComment(ctx, c, task.ID); err != nil {
+				slog.Warn("reconcile comments on completion: delegated failure recovery replay failed",
+					"issue_id", uuidToString(task.IssueID),
+					"task_id", uuidToString(task.ID),
+					"comment_id", uuidToString(c.ID),
+					"error", err,
+				)
+			} else {
+				scheduled++
+			}
 			continue
 		}
 		var parentComment *db.Comment
@@ -4573,7 +4524,7 @@ func (h *Handler) CancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.CancelTask(r.Context(), existing.ID)
+	task, err := h.TaskService.CancelTaskByUser(r.Context(), existing.ID)
 	if err != nil {
 		slog.Warn("cancel task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
