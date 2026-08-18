@@ -99,6 +99,56 @@ describe("left sidebar resizing", () => {
     expect(sidebar).toHaveAttribute("data-state", "expanded");
   });
 
+  it("clamps preview and committed width at the raised maximum", () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const { container } = renderWithI18n(
+      <SidebarProvider>
+        <Sidebar>
+          <SidebarRail />
+        </Sidebar>
+      </SidebarProvider>,
+    );
+
+    const wrapper = container.querySelector<HTMLElement>("[data-slot='sidebar-wrapper']")!;
+    const sidebarContainer = container.querySelector<HTMLElement>("[data-slot='sidebar-container']")!;
+    const sidebarGap = container.querySelector<HTMLElement>("[data-slot='sidebar-gap']")!;
+    const rail = container.querySelector<HTMLButtonElement>("[data-slot='sidebar-rail']")!;
+    rail.setPointerCapture = vi.fn();
+    rail.hasPointerCapture = vi.fn(() => true);
+    rail.releasePointerCapture = vi.fn();
+
+    vi.spyOn(sidebarContainer, "getBoundingClientRect").mockReturnValue({
+      bottom: 0,
+      height: 0,
+      left: 0,
+      right: 360,
+      top: 0,
+      width: 360,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.pointerDown(rail, {
+      button: 0,
+      clientX: 360,
+      isPrimary: true,
+      pointerId: 9,
+    });
+    // A 300px drag from 360 lands at 660 — past the 480 ceiling — so both
+    // the live preview and the commit must clamp there.
+    fireEvent.pointerMove(document, { buttons: 1, clientX: 660, pointerId: 9 });
+
+    expect(sidebarGap.style.width).toBe("480px");
+    expect(sidebarContainer.style.width).toBe("480px");
+
+    fireEvent.pointerUp(document, { pointerId: 9 });
+
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("480px");
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(setItem).toHaveBeenCalledWith("sidebar_width", "480");
+  });
+
   it("restores the committed width and cursor state when pointer capture is cancelled", () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     const { container } = renderWithI18n(

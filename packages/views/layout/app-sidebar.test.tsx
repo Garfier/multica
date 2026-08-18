@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@multica/core/api";
 import { AppSidebar } from "./app-sidebar";
@@ -84,11 +84,56 @@ vi.mock("@multica/ui/components/ui/collapsible", () => ({
   CollapsibleContent: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   CollapsibleTrigger: () => <button type="button" />,
 }));
-vi.mock("@multica/ui/components/ui/tooltip", () => ({
-  Tooltip: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  TooltipContent: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  TooltipTrigger: ({ children }: { children: React.ReactNode }) => <button type="button">{children}</button>,
-}));
+vi.mock("@multica/ui/components/ui/tooltip", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+
+  function MockTooltipContent({ children }: { children?: React.ReactNode }) {
+    return <div role="tooltip">{children}</div>;
+  }
+
+  return {
+    // Base UI's Root renders no element of its own; the display:contents
+    // wrapper keeps the trigger participating in the menu button's flex
+    // layout while exposing the controlled `open` state and a hover surface
+    // to tests. A controlled tooltip's content only mounts while open.
+    Tooltip: ({
+      children,
+      open,
+      onOpenChange,
+    }: {
+      children?: React.ReactNode;
+      open?: boolean;
+      onOpenChange?: (open: boolean) => void;
+    }) => (
+      <div
+        data-testid="tooltip-root"
+        data-open={open === undefined ? undefined : String(open)}
+        style={{ display: "contents" }}
+        onMouseOver={() => onOpenChange?.(true)}
+        onMouseOut={() => onOpenChange?.(false)}
+      >
+        {React.Children.map(children, (child) =>
+          open === false && React.isValidElement(child) && child.type === MockTooltipContent
+            ? null
+            : child,
+        )}
+      </div>
+    ),
+    TooltipContent: MockTooltipContent,
+    // Honour the `render` prop so the trigger stays whatever element the
+    // component chose — the pin label must remain a span, or the
+    // `.closest("button")` assertions below would land on the trigger.
+    TooltipTrigger: ({
+      children,
+      render,
+      ...props
+    }: {
+      children?: React.ReactNode;
+      render?: React.ReactElement;
+    } & Record<string, unknown>) =>
+      render ? React.cloneElement(render, props, children) : <button type="button">{children}</button>,
+  };
+});
 vi.mock("../common/use-app-foreground", () => ({
   useAppForeground: () => appForeground.current,
 }));
@@ -233,6 +278,58 @@ describe("PinRow", () => {
       "true",
     );
     expect(container.querySelector('button[data-href="/acme/issues"]')).not.toHaveAttribute("data-active");
+  });
+});
+
+// The sidebar width is capped, so long pinned titles are masked to one line.
+// Hovering an overflowing label must reveal the full title; a label that
+// fits gets no redundant tooltip.
+describe("PinRow label tooltip", () => {
+  const longTitle = "Investigate flaky deploy pipeline across staging and production";
+
+  beforeEach(() => {
+    navigation.current.pathname = "/acme/issues";
+    detail.current = {
+      isPending: false,
+      isError: false,
+      data: { identifier: "MUL-123", title: longTitle, status: "todo" },
+      error: null,
+    };
+    summary.current = [];
+    workspaces.current = [];
+  });
+
+  // jsdom reports 0×0 boxes; stub the label's measurements so the
+  // truncation check (scrollWidth > clientWidth) sees a realistic overflow.
+  const setLabelWidth = (el: HTMLElement, scrollWidth: number, clientWidth: number) => {
+    Object.defineProperty(el, "scrollWidth", { value: scrollWidth, configurable: true });
+    Object.defineProperty(el, "clientWidth", { value: clientWidth, configurable: true });
+  };
+
+  it("reveals the full title on hover when the label overflows", async () => {
+    render(<AppSidebar />);
+    const label = await screen.findByText(longTitle);
+    setLabelWidth(label, 420, 120);
+
+    fireEvent.mouseOver(label);
+
+    expect(label.closest('[data-testid="tooltip-root"]')).toHaveAttribute("data-open", "true");
+    expect(
+      screen.queryAllByRole("tooltip").some((tip) => tip.textContent === longTitle),
+    ).toBe(true);
+  });
+
+  it("keeps the tooltip closed while the label fits", async () => {
+    render(<AppSidebar />);
+    const label = await screen.findByText(longTitle);
+    setLabelWidth(label, 120, 120);
+
+    fireEvent.mouseOver(label);
+
+    expect(label.closest('[data-testid="tooltip-root"]')).not.toHaveAttribute("data-open", "true");
+    expect(
+      screen.queryAllByRole("tooltip").some((tip) => tip.textContent === longTitle),
+    ).toBe(false);
   });
 });
 

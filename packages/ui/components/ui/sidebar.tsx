@@ -28,7 +28,9 @@ import { PanelLeftIcon } from "lucide-react"
 
 const SIDEBAR_WIDTH_DEFAULT = 256
 const SIDEBAR_WIDTH_MIN = 200
-const SIDEBAR_WIDTH_MAX = 360
+// Room to widen past 360 matters for long pinned issue titles; the width is
+// user-controlled via the drag rail and clamped, so a higher ceiling is safe.
+const SIDEBAR_WIDTH_MAX = 480
 const SIDEBAR_WIDTH_STORAGE_KEY = "sidebar_width"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"

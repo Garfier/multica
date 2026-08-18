@@ -188,6 +188,8 @@ function SortablePinItem({
   const { t } = useT("layout");
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: pin.id });
   const wasDragged = useRef(false);
+  const labelRef = useRef<HTMLSpanElement | null>(null);
+  const [labelTooltipOpen, setLabelTooltipOpen] = useState(false);
 
   useEffect(() => {
     if (isDragging) wasDragged.current = true;
@@ -221,13 +223,41 @@ function SortablePinItem({
         )}
       >
         {iconNode}
-        <span
-          className="min-w-0 flex-1 overflow-hidden whitespace-nowrap"
-          style={{
-            maskImage: "linear-gradient(to right, black calc(100% - 12px), transparent)",
-            WebkitMaskImage: "linear-gradient(to right, black calc(100% - 12px), transparent)",
+        <Tooltip
+          open={labelTooltipOpen}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              setLabelTooltipOpen(false);
+              return;
+            }
+            // The sidebar width is capped, so long pinned titles are masked
+            // rather than ellipsised. Reveal the full name on hover — but
+            // only when it actually overflows; a fully visible title needs
+            // no echo.
+            const el = labelRef.current;
+            if (el && el.scrollWidth > el.clientWidth) {
+              setLabelTooltipOpen(true);
+            }
           }}
-        >{label}</span>
+        >
+          <TooltipTrigger
+            render={
+              <span
+                ref={labelRef}
+                className="min-w-0 flex-1 overflow-hidden whitespace-nowrap"
+                style={{
+                  maskImage: "linear-gradient(to right, black calc(100% - 12px), transparent)",
+                  WebkitMaskImage: "linear-gradient(to right, black calc(100% - 12px), transparent)",
+                }}
+              />
+            }
+          >
+            {label}
+          </TooltipTrigger>
+          <TooltipContent side="right" align="center" sideOffset={12}>
+            {label}
+          </TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={<span role="button" />}
