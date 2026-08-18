@@ -5,10 +5,12 @@ codex
 copilot
 cursor-agent
 deveco
+dsh
 grok
 hermes
 kimi
 kiro-cli
+omp
 openclaw
 opencode
 pi
@@ -18,3 +20,4 @@ qoderclicn
 reasonix
 traecli
 qwenpaw
+mcode

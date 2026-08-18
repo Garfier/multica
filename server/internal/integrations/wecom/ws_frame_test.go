@@ -23,7 +23,7 @@ func TestChannelMessageFromCallback_GroupKeepsSenderDistinctFromChat(t *testing.
 	mc.From.UserID = "SENDER_USERID"
 	mc.Text.Content = "hello"
 
-	msg := channelMessageFromCallback("bot-1", "", mc, "req-1")
+	msg := channelMessageFromCallback("bot-1", "", mc, "hello", "req-1")
 
 	if msg.Source.ChatType != channel.ChatTypeGroup {
 		t.Errorf("chat type = %v, want group", msg.Source.ChatType)
@@ -43,7 +43,7 @@ func TestChannelMessageFromCallback_P2PFallsBackChatIDToSender(t *testing.T) {
 	mc := aibotMsgCallback{MsgID: "m2", ChatID: "", ChatType: "single", MsgType: "text"}
 	mc.From.UserID = "USER_A"
 
-	msg := channelMessageFromCallback("bot-1", "", mc, "req-2")
+	msg := channelMessageFromCallback("bot-1", "", mc, "", "req-2")
 
 	if msg.Source.ChatType != channel.ChatTypeP2P {
 		t.Errorf("chat type = %v, want p2p", msg.Source.ChatType)
@@ -77,7 +77,7 @@ func TestChannelMessageFromCallback_P2PMentionIsProseNotACommand(t *testing.T) {
 
 			// A configured display name must not change this either: it is the
 			// chat type that decides, not whose name is at the front.
-			msg := channelMessageFromCallback("bot-1", "Multica Bot", mc, "req-p2p")
+			msg := channelMessageFromCallback("bot-1", "Multica Bot", mc, tc.content, "req-p2p")
 
 			if msg.CommandText != tc.content {
 				t.Errorf("CommandText = %q, want %q untouched — in a 1:1 the leading @ is a colleague's "+
@@ -107,7 +107,7 @@ func TestChannelMessageFromCallback_P2PCommandStillWorks(t *testing.T) {
 	mc.From.UserID = "USER_A"
 	mc.Text.Content = "/issue 登录失败"
 
-	msg := channelMessageFromCallback("bot-1", "Multica Bot", mc, "req-p2p-cmd")
+	msg := channelMessageFromCallback("bot-1", "Multica Bot", mc, mc.Text.Content, "req-p2p-cmd")
 
 	cmd, ok := engine.ParseIssueCommand(msg.CommandText)
 	if !ok {
@@ -121,7 +121,7 @@ func TestChannelMessageFromCallback_P2PCommandStillWorks(t *testing.T) {
 	}
 }
 
-func TestChannelMsgType_NonTextIsUnknown(t *testing.T) {
+func TestChannelMsgType_Normalization(t *testing.T) {
 	t.Parallel()
 	cases := map[string]channel.MsgType{
 		"text":  channel.MsgTypeText,
@@ -130,9 +130,11 @@ func TestChannelMsgType_NonTextIsUnknown(t *testing.T) {
 		"voice": channel.MsgTypeAudio,
 		"audio": channel.MsgTypeAudio,
 		"video": channel.MsgTypeVideo,
-		// "mixed" must NOT map to Text: dispatchFrame drops non-text before
-		// normalization, so mapping it to Text was dead and misleading.
-		"mixed":     channel.MsgTypeUnknown,
+		// 图文混排 is Text: ownText renders it to text runs plus a
+		// placeholder per attachment, and the attachments travel separately
+		// as MediaRefs. Same treatment Lark gives `post`
+		// (lark/feishu_channel.go:167).
+		"mixed":     channel.MsgTypeText,
 		"":          channel.MsgTypeUnknown,
 		"greetings": channel.MsgTypeUnknown,
 	}
@@ -162,5 +164,36 @@ func TestSendMsgTextBody_ShapeAndChatTypeValidation(t *testing.T) {
 	}
 	if _, err := sendMsgTextBody("chat-1", 3, "hi"); err == nil {
 		t.Error("chat_type 3 should be rejected (must be 1 or 2)")
+	}
+}
+
+// TestIssueCommandDetectionMatchesTheEngine: the adapter sets SkipAgentRun
+// from its own answer, and the engine files the issue from its own. Any input
+// they disagree on is a message that reaches nobody — no agent run because
+// this side said "command", no issue because that side said "prose".
+//
+// U+3000 is the case that mattered: it is what a Chinese IME emits for the
+// space bar in full-width mode, so it opens real messages.
+func TestIssueCommandDetectionMatchesTheEngine(t *testing.T) {
+	cases := []string{
+		"/issue the login redirect is broken",
+		"/issue",
+		"/issue\tthe title after a tab",
+		"  /issue leading halfwidth spaces",
+		"　/issue after an ideographic space",
+		"　　/issue after two",
+		"/issuewithoutspace",
+		"not a command at all",
+		"",
+		"\n\n/issue after blank lines",
+		"prose first\n/issue not at the front",
+		" /issue after a non-breaking space",
+	}
+	for _, body := range cases {
+		_, engineSays := engine.ParseIssueCommand(body)
+		if got := isIssueCommand(body); got != engineSays {
+			t.Errorf("isIssueCommand(%q) = %v but engine.ParseIssueCommand says %v — SkipAgentRun and the issue decision disagree, so this message reaches nobody",
+				body, got, engineSays)
+		}
 	}
 }

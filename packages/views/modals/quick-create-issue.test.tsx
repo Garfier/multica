@@ -1,4 +1,12 @@
-import { forwardRef, useImperativeHandle, useRef, useState, type ReactNode } from "react";
+import {
+  cloneElement,
+  forwardRef,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -135,7 +143,9 @@ vi.mock("@multica/core/paths", () => ({
   }),
 }));
 
-vi.mock("../navigation", () => ({
+// Mocked at the context module rather than the barrel so <AppLink> stays the
+// real component and its click contract is what the test exercises.
+vi.mock("../navigation/context", () => ({
   useNavigation: () => ({ push: mockNavigationPush }),
 }));
 
@@ -228,9 +238,22 @@ vi.mock("@multica/ui/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <>{children}</>,
   DropdownMenuTrigger: ({ render }: { render: ReactNode }) => <>{render}</>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <>{children}</>,
-  DropdownMenuItem: ({ children, onClick }: any) => (
-    <button type="button" onClick={onClick}>{children}</button>
-  ),
+  // `render` mirrors Base UI: an item can BE another element (an <AppLink>).
+  // The real Item gives that element role="button", which the queries match.
+  DropdownMenuItem: ({
+    children,
+    onClick,
+    render,
+  }: {
+    children: ReactNode;
+    onClick?: () => void;
+    render?: ReactElement<{ role?: string; children?: ReactNode }>;
+  }) =>
+    render ? (
+      cloneElement(render, { role: "button" }, children)
+    ) : (
+      <button type="button" onClick={onClick}>{children}</button>
+    ),
   DropdownMenuSeparator: () => null,
 }));
 
@@ -1021,6 +1044,44 @@ describe("AgentCreatePanel", () => {
       await act(async () => { release(undefined); });
 
       expect(mockQuickCreateIssue).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // MUL-6236 — the footer reflows to a 2x2 grid on phones. jsdom has no
+  // layout, so these pin the two structural preconditions the grid depends
+  // on rather than the rendered geometry.
+  describe("phone footer layout", () => {
+    beforeEach(() => {
+      renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+    });
+
+    it("keeps every footer control a direct child of the grid container", () => {
+      const switchToManual = screen.getByRole("button", { name: /Switch to Manual/i });
+      const create = screen.getByRole("button", { name: /^Create$/i });
+      const keepOpen = screen.getByRole("checkbox");
+      const attach = screen.getByRole("button", { name: "Upload file" });
+
+      const footer = switchToManual.parentElement;
+      expect(footer?.className).toContain("grid-cols-[auto_1fr]");
+      // From `sm` up the same children lay out as the original single row.
+      expect(footer?.className).toContain("sm:flex");
+
+      // Grid placement only sees direct children: re-wrapping any of these in
+      // a <div> collapses the 2x2 back to the jammed single row the bug
+      // report showed. The attach button keeps its own wrapper because it can
+      // gain a "N sent" badge — that wrapper is itself the first grid cell.
+      expect(create.parentElement).toBe(footer);
+      expect(keepOpen.parentElement?.parentElement).toBe(footer);
+      expect(attach.parentElement?.parentElement).toBe(footer);
+    });
+
+    it("hides the send keycaps below the sm breakpoint", () => {
+      const keycaps = document.querySelector('[data-slot="shortcut-keycaps"]');
+
+      // Present for pointer devices, display:none on a touch phone that has
+      // no ⌘ key and the least room in the footer row.
+      expect(keycaps).not.toBeNull();
+      expect(keycaps?.className).toContain("max-sm:hidden");
     });
   });
 });
