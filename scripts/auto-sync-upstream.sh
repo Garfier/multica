@@ -44,6 +44,17 @@ exec > >(tee -a "$RUN_LOG") 2>&1
 log()  { echo "[$(date '+%F %T')] $*"; }
 today() { date +%F; }
 
+# Self-lock on a dedicated fd instead of a cron-level `flock` wrapper: the
+# wrapper's lock fd is inherited by every child — including the API server
+# this script restarts — which would hold the lock forever and silently
+# wedge all future runs (exactly what happened on 2026-08-20).
+LOCK="${MULTICA_SYNC_LOCK:-/tmp/multica-auto-sync.lock}"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  log "another auto-sync run is in progress; skipping"
+  exit 0
+fi
+
 write_status() { # status stage detail
   printf '{"date":"%s","status":"%s","stage":"%s","detail":"%s"}\n' \
     "$(today)" "$1" "$2" "${3//\"/\\\"}" > "$STATUS_FILE"
@@ -209,6 +220,8 @@ os.setsid(); os.chdir(repo)
 log_fd = os.open("/data/sam.liux/multica-logs/server.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
 null_fd = os.open("/dev/null", os.O_RDONLY)
 os.dup2(null_fd, 0); os.dup2(log_fd, 1); os.dup2(log_fd, 2)
+# Never leak inherited fds (sync-script lock fd!) into the long-lived server.
+os.closerange(3, 1024)
 os.execve(repo + "/server/bin/server", ["./server/bin/server"], env)
 PY
 [ $? -eq 0 ] || fail server "server restart spawn failed"
@@ -226,7 +239,8 @@ if [ "$SERVER_OK" -ne 1 ]; then
     NEW_PID=$(pgrep -xf './server/bin/server' | head -1 || true)
     [ -n "$NEW_PID" ] && kill "$NEW_PID" 2>/dev/null
     sleep 2
-    (cd "$REPO" && nohup ./server/bin/server >> /data/sam.liux/multica-logs/server.log 2>&1 &)
+    # 9>&- : don't leak the sync lock fd into the rolled-back server either.
+    (cd "$REPO" && nohup ./server/bin/server >> /data/sam.liux/multica-logs/server.log 2>&1 9>&- &)
   fi
   fail server "new server unhealthy after 60s; rolled back to previous binary"
 fi
