@@ -243,7 +243,7 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim)
 	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -261,6 +261,10 @@ type Config struct {
 	// vendor's binary; it defaults to false so an unset caller fails
 	// closed onto standard behavior.
 	BuiltinRuntime bool
+	// provider is the runtime/provider identity used in safe launch logs. New
+	// fills it from the protocol family; NewRuntime preserves the concrete
+	// built-in runtime identity instead (for example omp rather than pi).
+	provider string
 	// LaunchPrefix is the argv prefix that belongs to ExecutablePath itself —
 	// a custom runtime profile's fixed_args. It is spliced in directly after
 	// the executable, ahead of every argument a backend builds, because a
@@ -316,6 +320,7 @@ var SupportedTypes = []string{
 	"qwen",
 	"qwenpaw",
 	"mcode",
+	"dim",
 }
 
 // IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
@@ -361,6 +366,9 @@ func New(agentType string, cfg Config) (Backend, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.provider == "" {
+		cfg.provider = agentType
+	}
 	// Filter the launch prefix here, at the one point that knows both the
 	// prefix and the protocol family. Doing it per-backend would be the same
 	// opt-in arrangement that let ExtraArgs rot: a family that forgot the call
@@ -395,6 +403,8 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &reasonixBackend{cfg: cfg}, nil
 	case "dsh":
 		return &dshBackend{cfg: cfg}, nil
+	case "dim":
+		return &dimBackend{cfg: cfg}, nil
 	case "kiro":
 		return &kiroBackend{cfg: cfg}, nil
 	case "antigravity":
@@ -454,6 +464,7 @@ var launchHeaders = map[string]string{
 	"grok":        "grok agent stdio",
 	"qwen":        "qwen -p (stream-json)",
 	"qwenpaw":     "qwenpaw acp",
+	"dim":         "dim acp",
 	"mcode":       "mcode acp",
 }
 

@@ -2,6 +2,7 @@
 
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { useStatusLabel } from "../utils/status-label";
+import { NO_PROPERTY_VALUE } from "../utils/filter";
 import { useMemo, type ReactNode } from "react";
 import {
   CalendarDays,
@@ -181,7 +182,7 @@ function useFilterChips(
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
   const resolveStatusLabel = useStatusLabel(wsId);
-  const { categoryOf, entryOf } = useIssueStatuses(wsId);
+  const { categoryOf, colorOf } = useIssueStatuses(wsId);
 
   const statusFilters = useViewStore((s) => s.statusFilters);
   const priorityFilters = useViewStore((s) => s.priorityFilters);
@@ -351,7 +352,7 @@ function useFilterChips(
               key={s}
               status={s}
               category={categoryOf(s)}
-              color={entryOf(s)?.is_system === true ? null : entryOf(s)?.color}
+              color={colorOf(s)}
               className="size-3"
             />
           ))}
@@ -457,6 +458,9 @@ function useFilterChips(
     const actorProperty = isActorPropertyType(definition.type);
     const actorValues = actorProperty ? actorFilterValues(selected) : [];
     const optionName = (optionId: string): string | undefined => {
+      if (optionId === NO_PROPERTY_VALUE) {
+        return t(($) => $.pickers.custom_property.none);
+      }
       if (actorProperty) {
         const ref = parseActorRef(optionId);
         return ref ? actorName({ type: ref.kind, id: ref.id }) : undefined;
