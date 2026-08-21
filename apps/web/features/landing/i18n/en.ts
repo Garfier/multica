@@ -294,6 +294,47 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.32",
+        date: "2026-08-21",
+        title: "DingTalk groups, Project views, and smoother teamwork",
+        changes: [],
+        features: [
+          "Mention a DingTalk bot in a group and that group appears under its agent.",
+          "Group Board and Table views by Project to keep related Issues together.",
+        ],
+        improvements: [
+          "Long-running agents stay more responsive while they work.",
+          "Self-hosted servers recover automatically after a brief database outage.",
+          "Telegram now greets you and replies in English.",
+        ],
+        fixes: [
+          "Running a task again no longer stops work already in progress.",
+          "Tasks running at the same time no longer overwrite one another’s workspace.",
+          "OpenClaw, Pi, and OpenCode work with the custom providers you configure.",
+          "Changing workspaces no longer interrupts live updates or @mentions.",
+          "Autopilot webhook secrets stay out of normal CLI output.",
+          "Chat with your agents without waiting for unrelated coding work to finish.",
+        ],
+      },
+      {
+        version: "0.4.31",
+        date: "2026-08-20",
+        title: "Run confirmation before leaving backlog, Webhook event filters, and Windows build fixes",
+        changes: [],
+        improvements: [
+          "The web Help menu now makes the desktop app easier to find.",
+          "You can confirm an agent run before moving an assigned Issue out of backlog.",
+          "Webhook event filters are easier to add and remove.",
+          "The / picker now ranks exact skill matches first.",
+        ],
+        fixes: [
+          "Windows command-line builds now create correctly named executables.",
+          "Agents can still load skills after a brief connection drop.",
+          "Run now no longer exposes internal error details.",
+          "Agent updates stay responsive in busy workspaces.",
+        ],
+      },
+      {
         version: "0.4.30",
         date: "2026-08-19",
         title: "Safer Issue editing, empty-property filters, and clearer agent identity",
