@@ -661,6 +661,15 @@ const TaskWorkspacesRootEnv = "MULTICA_TASK_WORKSPACES_ROOT"
 // (e.g. `multica daemon disk-usage`) use this directly so they pick the same
 // directory the running daemon would have picked. Inside a managed task use
 // TaskWorkspacesRootEnv instead — see resolveDiskUsageRoot.
+//
+// The result is canonical: symlinks on the way to the root (a symlinked
+// $HOME, a linked volume) are collapsed as far as the path exists. Fresh
+// task envs derive their paths from this root while workdir reuse resolves
+// the same root with filepath.EvalSymlinks (shouldReusePriorWorkdir), and
+// agents key their session stores by the raw working-directory string they
+// were launched in. Two spellings of one directory would then hand the
+// agent one cwd on the first message and another on every resume, silently
+// restarting the conversation.
 func ResolveWorkspacesRoot(profile, override string) (string, error) {
 	root := strings.TrimSpace(os.Getenv("MULTICA_WORKSPACES_ROOT"))
 	if override != "" {
@@ -681,7 +690,41 @@ func ResolveWorkspacesRoot(profile, override string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute workspaces root: %w", err)
 	}
-	return abs, nil
+	return canonicalizePathLenient(abs), nil
+}
+
+// canonicalizePathLenient resolves symlinks in path as far as the path
+// exists on disk. canonicalPath fails outright when a trailing component is
+// missing (EvalSymlinks on Unix, CreateFile on Windows), and the workspaces
+// root usually does not exist yet when it is first resolved — the daemon
+// creates it lazily — so resolve the deepest existing ancestor and re-attach
+// the missing tail. Returns path unchanged when nothing along it can be
+// resolved; a string the caller can still use beats no root at all.
+func canonicalizePathLenient(path string) string {
+	if real, err := canonicalPath(path); err == nil {
+		return real
+	}
+	cur := path
+	var tail []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+	real, err := canonicalPath(cur)
+	if err != nil {
+		return path
+	}
+	for i := len(tail) - 1; i >= 0; i-- {
+		real = filepath.Join(real, tail[i])
+	}
+	return real
 }
 
 // ArtifactPatternsFromEnv returns the configured artifact patternSet — the

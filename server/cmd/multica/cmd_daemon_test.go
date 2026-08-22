@@ -631,8 +631,23 @@ func TestPrintDaemonStatusAlignsValuesWithProfileLabel(t *testing.T) {
 	}
 }
 
+// canonicalTempDir returns a temp directory with symlinks resolved.
+// daemon.ResolveWorkspacesRoot canonicalizes the roots it returns, so
+// expectations built against it must start from an already-canonical base:
+// on platforms whose temp directory is itself symlinked (macOS /var ->
+// /private/var) the raw t.TempDir spelling no longer matches.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("canonicalize temp dir: %v", err)
+	}
+	return resolved
+}
+
 func TestPrintDiskUsageOtherRootsHintSuggestsProfilesWithTasks(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 
@@ -680,7 +695,7 @@ func TestPrintDiskUsageOtherRootsHintSuggestsProfilesWithTasks(t *testing.T) {
 // root already has tasks, otherwise the Desktop app's root stays hidden behind
 // a non-empty default root.
 func TestPrintDiskUsageOtherRootsHintFiresWhenCurrentRootNonEmpty(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 
@@ -700,7 +715,7 @@ func TestPrintDiskUsageOtherRootsHintFiresWhenCurrentRootNonEmpty(t *testing.T) 
 }
 
 func TestPrintDiskUsageOtherRootsHintSuggestsDefaultFromNamedProfile(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 
@@ -718,8 +733,8 @@ func TestPrintDiskUsageOtherRootsHintSuggestsDefaultFromNamedProfile(t *testing.
 }
 
 func TestPrintDiskUsageOtherRootsHintUsesProfileConfig(t *testing.T) {
-	home := t.TempDir()
-	customRoot := filepath.Join(t.TempDir(), "custom-profile-root")
+	home := canonicalTempDir(t)
+	customRoot := filepath.Join(canonicalTempDir(t), "custom-profile-root")
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 	if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{WorkspacesRoot: customRoot}, "custom"); err != nil {
@@ -742,7 +757,7 @@ func TestPrintDiskUsageOtherRootsHintUsesProfileConfig(t *testing.T) {
 }
 
 func TestPrintDiskUsageOtherRootsHintSkipsExplicitRootOverride(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 
@@ -760,7 +775,7 @@ func TestPrintDiskUsageOtherRootsHintSkipsExplicitRootOverride(t *testing.T) {
 }
 
 func TestEnumerateDiskUsageRoots(t *testing.T) {
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 

@@ -1594,3 +1594,78 @@ func TestApplyOpenclawOverride_CLITimeout(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveWorkspacesRootResolvesSymlinkedHome pins the fix for sessions
+// lost on resume: agents key their session stores by the raw cwd string, so
+// the root fresh envs are prepared under must be spelled exactly the way
+// workdir reuse resolves it (filepath.EvalSymlinks). A $HOME that is itself
+// a symlink — /home/user -> /data/user on many Linux hosts, /var ->
+// /private/var on macOS — used to give the first message one spelling and
+// every resume the other, restarting the conversation.
+func TestResolveWorkspacesRootResolvesSymlinkedHome(t *testing.T) {
+	realHome := t.TempDir()
+	linkedHome := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(realHome, linkedHome); err != nil {
+		t.Fatalf("symlink home: %v", err)
+	}
+	t.Setenv("HOME", linkedHome)
+	t.Setenv("USERPROFILE", linkedHome)
+	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
+
+	canonicalHome, err := filepath.EvalSymlinks(realHome)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(real home): %v", err)
+	}
+
+	got, err := ResolveWorkspacesRoot("", "")
+	if err != nil {
+		t.Fatalf("ResolveWorkspacesRoot: %v", err)
+	}
+	if want := filepath.Join(canonicalHome, "multica_workspaces"); got != want {
+		t.Fatalf("root = %q, want canonical %q: a symlinked $HOME must not leak into the spelling", got, want)
+	}
+
+	got, err = ResolveWorkspacesRoot("staging", "")
+	if err != nil {
+		t.Fatalf("ResolveWorkspacesRoot(staging): %v", err)
+	}
+	if want := filepath.Join(canonicalHome, "multica_workspaces_staging"); got != want {
+		t.Fatalf("profiled root = %q, want canonical %q", got, want)
+	}
+}
+
+// TestResolveWorkspacesRootResolvesSymlinkedOverrideWithMissingTail covers an
+// explicit root reached through a symlink when the root itself does not
+// exist yet (the daemon creates it lazily): the existing prefix must still
+// be canonicalized, and the missing tail must survive.
+func TestResolveWorkspacesRootResolvesSymlinkedOverrideWithMissingTail(t *testing.T) {
+	realRoot := t.TempDir()
+	linkedRoot := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(realRoot, linkedRoot); err != nil {
+		t.Fatalf("symlink root: %v", err)
+	}
+	t.Setenv("MULTICA_WORKSPACES_ROOT", filepath.Join(linkedRoot, "nested", "workspaces"))
+
+	canonicalRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(real root): %v", err)
+	}
+
+	got, err := ResolveWorkspacesRoot("", "")
+	if err != nil {
+		t.Fatalf("ResolveWorkspacesRoot: %v", err)
+	}
+	if want := filepath.Join(canonicalRoot, "nested", "workspaces"); got != want {
+		t.Fatalf("root = %q, want canonical %q with the missing tail kept", got, want)
+	}
+}
+
+// TestCanonicalizePathLenientKeepsUnresolvablePaths guards the fallback: a
+// path with no existing component at all comes back unchanged instead of
+// erroring, so first-boot resolution on an empty machine still yields a root.
+func TestCanonicalizePathLenientKeepsUnresolvablePaths(t *testing.T) {
+	missing := filepath.Join(string(filepath.Separator), "definitely-absent-multica-test-dir", "workspaces")
+	if got := canonicalizePathLenient(missing); got != missing {
+		t.Fatalf("canonicalizePathLenient(%q) = %q, want the input unchanged", missing, got)
+	}
+}

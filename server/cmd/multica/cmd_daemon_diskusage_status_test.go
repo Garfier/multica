@@ -481,7 +481,7 @@ func TestResolveDiskUsageRootTaskContext(t *testing.T) {
 	}
 
 	t.Run("outside a task keeps profile resolution", func(t *testing.T) {
-		home := t.TempDir()
+		home := canonicalTempDir(t)
 		t.Setenv("HOME", home)
 		t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 		t.Setenv(daemon.TaskWorkspacesRootEnv, filepath.Join(t.TempDir(), "ignored"))
@@ -498,8 +498,8 @@ func TestResolveDiskUsageRootTaskContext(t *testing.T) {
 
 func TestRunDaemonDiskUsageHonorsProfileWorkspacesRoot(t *testing.T) {
 	pinHumanCLIContext(t)
-	home := t.TempDir()
-	customRoot := filepath.Join(t.TempDir(), "configured-workspaces")
+	home := canonicalTempDir(t)
+	customRoot := filepath.Join(canonicalTempDir(t), "configured-workspaces")
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 	if err := cli.SaveCLIConfig(cli.CLIConfig{WorkspacesRoot: customRoot}); err != nil {
@@ -525,9 +525,9 @@ func TestRunDaemonDiskUsageHonorsProfileWorkspacesRoot(t *testing.T) {
 
 func TestResolveDiskUsageRootEnvOverridesProfileConfig(t *testing.T) {
 	pinHumanCLIContext(t)
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	configRoot := filepath.Join(t.TempDir(), "configured-workspaces")
-	envRoot := filepath.Join(t.TempDir(), "env-workspaces")
+	envRoot := filepath.Join(canonicalTempDir(t), "env-workspaces")
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", envRoot)
 	if err := cli.SaveCLIConfig(cli.CLIConfig{WorkspacesRoot: configRoot}); err != nil {
@@ -545,11 +545,11 @@ func TestResolveDiskUsageRootEnvOverridesProfileConfig(t *testing.T) {
 
 func TestEnumerateDiskUsageRootsUsesAndDeduplicatesProfileConfig(t *testing.T) {
 	pinHumanCLIContext(t)
-	home := t.TempDir()
-	defaultRoot := filepath.Join(t.TempDir(), "default-root")
-	sharedRoot := filepath.Join(t.TempDir(), "shared-root")
-	uniqueRoot := filepath.Join(t.TempDir(), "unique-root")
-	neverRanRoot := filepath.Join(t.TempDir(), "never-ran-root")
+	home := canonicalTempDir(t)
+	defaultRoot := filepath.Join(canonicalTempDir(t), "default-root")
+	sharedRoot := filepath.Join(canonicalTempDir(t), "shared-root")
+	uniqueRoot := filepath.Join(canonicalTempDir(t), "unique-root")
+	neverRanRoot := filepath.Join(canonicalTempDir(t), "never-ran-root")
 	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
 

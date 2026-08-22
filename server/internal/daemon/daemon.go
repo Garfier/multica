@@ -5723,6 +5723,29 @@ func sameExistingDir(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
+// reuseSpellingForPriorWorkdir picks the path spelling the agent runs in
+// when a prior workdir is reused. validated is the canonical path
+// shouldReusePriorWorkdir approved and the caller locked; recorded is the
+// spelling the previous task actually ran with, echoed back by the server
+// as task.PriorWorkDir.
+//
+// Agents key their session stores by the raw working-directory string they
+// were launched in. An env created before ResolveWorkspacesRoot
+// canonicalized the root carries the pre-canonicalization spelling (a
+// symlinked $HOME is enough), and handing the agent the canonical spelling
+// instead would restart every session still alive in that directory. When
+// the recorded spelling provably names the very directory that was
+// validated — identity, not string — it wins. A recorded path that is gone
+// or resolves elsewhere falls back to the validated canonical path; the
+// post-prepare identity check still turns any late rename of the recorded
+// name into "declined and started clean".
+func reuseSpellingForPriorWorkdir(recorded, validated string) string {
+	if recorded == "" || !sameExistingDir(recorded, validated) {
+		return validated
+	}
+	return filepath.Clean(recorded)
+}
+
 func gateResumeToReusedWorkdir(task *Task, taskCtx *execenv.TaskContextForEnv, envWorkDir string, sessionHomeReachable bool, taskLog *slog.Logger) bool {
 	// Compare the directories, not the spelling. Reuse runs in the canonical
 	// path it validated and locked, which need not be character-identical to
@@ -6236,7 +6259,10 @@ func (d *Daemon) lockReusablePriorEnvRoot(task Task, localAssignment *localDirec
 		claim.Release()
 		return nil, "", nil, false
 	}
-	return claim, workDir, lockedInfo, true
+	// Hand Reuse the spelling the prior task ran with when it names this
+	// exact directory, so agents that key sessions by the raw cwd string
+	// find what they wrote (see reuseSpellingForPriorWorkdir).
+	return claim, reuseSpellingForPriorWorkdir(task.PriorWorkDir, workDir), lockedInfo, true
 }
 
 // reuseLockTestHook runs between reuse eligibility validation and taking the
@@ -6890,9 +6916,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		env, err = d.reuseExecutionEnvironment(prepareCtx, execenv.ReuseParams{
 			WorkspacesRoot: d.cfg.WorkspacesRoot,
 			Profile:        d.cfg.Profile,
-			// The canonical path the lock was taken on. Handing Reuse the raw
-			// PriorWorkDir instead would re-resolve it, so the directory we
-			// locked and the directory we use could differ.
+			// The validated path the lock was taken on, in the spelling the
+			// prior task ran with (lockReusablePriorEnvRoot). Handing Reuse an
+			// unvalidated name instead would re-resolve it, so the directory
+			// we locked and the directory we use could differ.
 			WorkDir:               priorWorkDir,
 			Provider:              provider,
 			CodexVersion:          codexVersion,

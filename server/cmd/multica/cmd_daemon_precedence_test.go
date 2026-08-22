@@ -48,10 +48,10 @@ func TestResolveDaemonStringOverridePrecedence(t *testing.T) {
 }
 
 func TestResolveDaemonWorkspacesRootPrecedence(t *testing.T) {
-	home := t.TempDir()
-	flagRoot := filepath.Join(t.TempDir(), "flag")
-	envRoot := filepath.Join(t.TempDir(), "env")
-	configRoot := filepath.Join(t.TempDir(), "config")
+	home := canonicalTempDir(t)
+	flagRoot := filepath.Join(canonicalTempDir(t), "flag")
+	envRoot := filepath.Join(canonicalTempDir(t), "env")
+	configRoot := filepath.Join(canonicalTempDir(t), "config")
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{WorkspacesRoot: configRoot}, "dev"); err != nil {
