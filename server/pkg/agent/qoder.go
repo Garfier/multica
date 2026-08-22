@@ -260,7 +260,23 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if err != nil {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("qoder session/resume failed: %v", err)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
+				if isACPSessionNotFound(err) {
+					// Positive evidence that the runtime refused the session we
+					// asked to resume (INVALID_SESSION_IDENTIFIER /
+					// NO_SESSIONS_FOUND): the transcript is unrecoverable from
+					// this adapter and only starting over can cure it. Report
+					// the rejection so the daemon retries with a fresh session
+					// (shouldRetryWithFreshSession) instead of surfacing a hard
+					// failure. Handshake/network failures must leave this false
+					// — see the Result.ResumeRejected contract.
+					b.cfg.Logger.Warn("qoder session/resume rejected the prior session; reporting rejection for fresh-session retry",
+						"backend", "qoder",
+						"requested", opts.ResumeSessionID,
+						"error", err,
+					)
+					resumeRejected = true
+				}
+				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
 				return
 			}
 			var changed bool

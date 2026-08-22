@@ -2522,6 +2522,21 @@ func TestIsACPSessionNotFound(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "qoder invalid session identifier on resume",
+			// qodercli's real session/resume rejection shape: invalid_params
+			// with the human wording in message and the machine code in
+			// data (observed 2026-08-22, cwd-spelling divergence incident).
+			err: &acpRPCError{Method: "session/resume", Code: -32602,
+				Message: `Invalid session identifier "ses_stale". Searched current project and same-repo worktrees.`,
+				Data:    `{"code":"INVALID_SESSION_IDENTIFIER","sessionId":"ses_stale","projectRoot":"/data/u/multica_workspaces/ws/06a5b0b3/workdir"}`},
+			want: true,
+		},
+		{
+			name: "qoder no sessions found as data code",
+			err:  &acpRPCError{Method: "session/resume", Code: -32602, Message: "Invalid params", Data: `{"code":"NO_SESSIONS_FOUND"}`},
+			want: true,
+		},
+		{
 			name: "invalid params without session wording",
 			err:  &acpRPCError{Method: "session/set_model", Code: -32602, Message: "model not available: bogus-model"},
 			want: false,

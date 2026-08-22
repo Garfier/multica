@@ -1248,11 +1248,15 @@ func (e *acpRPCError) Error() string {
 // session id it no longer knows. Runtimes signal this with codes and
 // wording that vary — Hermes says "Session not found" under -32603
 // (Internal error), Kiro puts "No session found with id ..." in
-// `data` under -32603, and kimi-cli raises invalid_params (-32602)
+// `data` under -32603, kimi-cli raises invalid_params (-32602)
 // with {"session_id": "Session not found"} in `data` for every
-// unknown-session path (src/kimi_cli/acp/server.py), while Reasonix says
-// "session/resume: unknown session <id>" under -32602 — so neither the
-// code nor one runtime's exact wording is discriminating and both are matched.
+// unknown-session path (src/kimi_cli/acp/server.py), Reasonix says
+// "session/resume: unknown session <id>" under -32602, and qodercli
+// answers session/resume with invalid_params (-32602) 'Invalid session
+// identifier "<id>"' plus data.code INVALID_SESSION_IDENTIFIER (or
+// NO_SESSIONS_FOUND when the project holds no session at all) — so
+// neither the code nor one runtime's exact wording is discriminating
+// and both are matched.
 func isACPSessionNotFound(err error) bool {
 	var rpcErr *acpRPCError
 	if !errors.As(err, &rpcErr) {
@@ -1264,7 +1268,11 @@ func isACPSessionNotFound(err error) bool {
 	text := strings.ToLower(rpcErr.Message + " " + rpcErr.Data)
 	return strings.Contains(text, "session not found") ||
 		strings.Contains(text, "no session found") ||
-		strings.Contains(text, "unknown session")
+		strings.Contains(text, "no sessions found") ||
+		strings.Contains(text, "unknown session") ||
+		strings.Contains(text, "invalid session identifier") ||
+		strings.Contains(text, "invalid_session_identifier") ||
+		strings.Contains(text, "no_sessions_found")
 }
 
 // isACPHeldByProcess reports whether a session/load error means the session

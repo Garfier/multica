@@ -108,6 +108,48 @@ done
 `
 }
 
+// fakeQoderACPResumeRejectedScript impersonates qodercli refusing
+// session/resume outright — the shape observed in the cwd-spelling incident:
+// invalid_params with the human wording in message and data.code
+// INVALID_SESSION_IDENTIFIER. The session is gone (or indexed under another
+// path spelling); only a fresh session can continue the task.
+func fakeQoderACPResumeRejectedScript() string {
+	return `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$id"
+      ;;
+    *'"method":"session/resume"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Invalid session identifier. Searched current project and same-repo worktrees.","data":{"code":"INVALID_SESSION_IDENTIFIER","sessionId":"ses_stale"}}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+`
+}
+
+// fakeQoderACPResumeTransportDropScript answers initialize, then dies the
+// moment session/resume arrives — a transport failure, not a rejection. The
+// backend must NOT report ResumeRejected for this shape: the session may be
+// perfectly alive, and the platform's own retry is supposed to inherit it.
+func fakeQoderACPResumeTransportDropScript() string {
+	return `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n' "$id"
+      ;;
+    *'"method":"session/resume"'*)
+      exit 1
+      ;;
+  esac
+done
+`
+}
+
 func fakeQoderACPStaleResumeSetModelScript() string {
 	return `#!/bin/sh
 while IFS= read -r line; do
@@ -995,6 +1037,102 @@ func TestQoderBackendClearsSessionIDWhenResumedSessionNotFoundAtSetModel(t *test
 		}
 		if result.SessionID != "" {
 			t.Errorf("expected empty session id so the daemon's fresh-session retry fires, got %q", result.SessionID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestQoderBackendReportsResumeRejectedWhenResumeRefused is the
+// INVALID_SESSION_IDENTIFIER regression: when session/resume itself is
+// rejected, the backend must report ResumeRejected so the daemon's
+// fresh-session retry downgrades the failure to "lost context but still
+// answers" instead of hard-failing the task.
+func TestQoderBackendReportsResumeRejectedWhenResumeRefused(t *testing.T) {
+	t.Parallel()
+
+	fakePath := filepath.Join(t.TempDir(), "qodercli")
+	writeTestExecutable(t, fakePath, []byte(fakeQoderACPResumeRejectedScript()))
+
+	backend, err := New("qoder", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("new qoder backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
+		Timeout:         30 * time.Second,
+		ResumeSessionID: "ses_stale",
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+
+	select {
+	case result, ok := <-session.Result:
+		if !ok {
+			t.Fatal("result channel closed without a value")
+		}
+		if result.Status != "failed" {
+			t.Fatalf("expected status=failed, got %q (error=%q)", result.Status, result.Error)
+		}
+		if !strings.Contains(result.Error, "Invalid session identifier") {
+			t.Errorf("expected error to surface the rejection wording, got %q", result.Error)
+		}
+		if !result.ResumeRejected {
+			t.Error("expected ResumeRejected=true so the daemon's fresh-session retry fires instead of a hard failure")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestQoderBackendKeepsSessionOnResumeTransportFailure guards the other
+// half of the ResumeRejected contract: a transport-level failure of
+// session/resume is NOT evidence the session is gone, so the flag must
+// stay false and the platform retry keeps the session pointer.
+func TestQoderBackendKeepsSessionOnResumeTransportFailure(t *testing.T) {
+	t.Parallel()
+
+	fakePath := filepath.Join(t.TempDir(), "qodercli")
+	writeTestExecutable(t, fakePath, []byte(fakeQoderACPResumeTransportDropScript()))
+
+	backend, err := New("qoder", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("new qoder backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
+		Timeout:         30 * time.Second,
+		ResumeSessionID: "ses_stale",
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+
+	select {
+	case result, ok := <-session.Result:
+		if !ok {
+			t.Fatal("result channel closed without a value")
+		}
+		if result.Status != "failed" {
+			t.Fatalf("expected status=failed, got %q (error=%q)", result.Status, result.Error)
+		}
+		if result.ResumeRejected {
+			t.Error("transport failure must not be reported as a resume rejection; the session may still be alive")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")
