@@ -7,7 +7,8 @@
 #   3. push the verified merge to origin (the fork)
 #   4. deploy: pg backup -> rebuild binaries -> migrate -> restart server
 #              -> rebuild & recreate the frontend container
-#   5. file a multica issue summarizing the synced features + deploy result
+#   5. file a multica issue (@mentioning the owner) summarizing the synced
+#      features + deploy result, and drop a mention row into his inbox
 #
 # Safety rules:
 #   - merge conflict           -> abort merge, report, exit (repo untouched)
@@ -26,6 +27,15 @@ BACKUP_DIR=/data/sam.liux/multica-logs/db-backups
 STATUS_FILE="$LOG_DIR/last-status.json"
 MULTICA_BIN="$REPO/server/bin/multica"
 WORKSPACE_ID=b1d16988-e87b-4203-a359-494115cf6505
+
+# Owner who should see every sync report / failure alert in his multica inbox.
+# NOTE: the CLI authenticates as this same user, and the server never creates
+# inbox rows for the actor himself (notifyDirect / notifyMentionedMembers in
+# server/cmd/server/notification_listeners.go) — a plain @mention or assignment
+# to him would be silent. file_issue therefore also inserts the inbox_item row
+# directly, in the same shape the app would have written for a mention.
+OWNER_USER_ID=85ba075a-b8cf-4486-92d4-5707975fd283
+OWNER_MENTION='[@聿剑(sam.liux)](mention://member/85ba075a-b8cf-4486-92d4-5707975fd283)'
 COMPOSE_FILES=(-f docker-compose.selfhost.yml -f docker-compose.selfhost.build.yml -f docker-compose.override.yml)
 
 # go comes from miniconda on this box; cron gives us nothing, so be explicit.
@@ -66,17 +76,42 @@ file_issue() { # title; body on stdin. Best-effort.
     log "issue skipped: multica CLI missing"
     return 0
   fi
-  ( cd "$REPO" && MULTICA_WORKSPACE_ID="$WORKSPACE_ID" \
-      "$MULTICA_BIN" issue create --title "$title" --description-stdin --output json ) \
-    | head -5 || log "issue creation failed (see log)"
+  local out issue_id
+  if ! out=$( cd "$REPO" && MULTICA_WORKSPACE_ID="$WORKSPACE_ID" \
+      "$MULTICA_BIN" issue create --title "$title" --description-stdin --output json ); then
+    log "issue creation failed (see log)"
+    return 0
+  fi
+  echo "$out" | head -5
+  issue_id=$(echo "$out" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id") or "")' 2>/dev/null)
+  notify_owner_inbox "${issue_id:-}" "$title"
+}
+
+# The @mention in the body renders nicely and auto-subscribes him, but the
+# server skips inbox rows for the actor (who is the owner himself here) — so
+# insert the mention inbox row directly, same columns the app writes.
+notify_owner_inbox() { # issue_id title. Best-effort.
+  local issue_id="$1" title="$2"
+  [ -n "$issue_id" ] || { log "owner inbox skipped: no issue id"; return 0; }
+  if sudo -n docker exec -i multica-postgres-1 psql -U multica -v ON_ERROR_STOP=1 -q <<SQL
+insert into inbox_item (workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, actor_type, actor_id)
+values ('$WORKSPACE_ID', 'member', '$OWNER_USER_ID', 'mentioned', 'info',
+        '$issue_id', '$title', '每日 upstream 自动同步', 'member', '$OWNER_USER_ID');
+SQL
+  then
+    log "owner inbox: mention row inserted for issue $issue_id"
+  else
+    log "owner inbox insert failed (see log)"
+  fi
+  return 0
 }
 
 fail() { # stage detail
   local stage="$1" detail="$2"
   log "FAILED [$stage] $detail"
   write_status failed "$stage" "$detail"
-  printf 'Auto-sync failed at stage `%s` on %s.\n\n```\n%s\n```\n\nFull log: `%s`\n' \
-    "$stage" "$(today)" "$(echo "$detail" | tail -20)" "$RUN_LOG" \
+  printf '%s\n\nAuto-sync failed at stage `%s` on %s.\n\n```\n%s\n```\n\nFull log: `%s`\n' \
+    "$OWNER_MENTION" "$stage" "$(today)" "$(echo "$detail" | tail -20)" "$RUN_LOG" \
     | file_issue "⚠️ Multica auto-sync FAILED at $stage ($(today))" || true
   exit 1
 }
@@ -277,7 +312,7 @@ if [ "$NEW_COMMITS" -gt 0 ]; then
   {
     echo "## ⬆️ Upstream sync $(today)"
     echo ""
-    echo "同步上游 \`multica-ai/multica\` 更新并自动升级本地部署。"
+    echo "$OWNER_MENTION 同步上游 \`multica-ai/multica\` 更新并自动升级本地部署。"
     echo ""
     echo "- 提交范围: \`${BEFORE:0:9}\` → \`${AFTER:0:9}\`(共 **$NEW_COMMITS** 个提交;feat $FEATURE_COUNT / fix $FIX_COUNT)"
     echo "- 后端: \`$BACKEND_VERSION\`,server 已重启且 /health 正常"
